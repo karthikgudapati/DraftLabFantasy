@@ -289,6 +289,36 @@ async function fetchTrending() {
   } catch (err) { return staleFallback(LS.trend, err); }
 }
 
+// Weekly NFL schedule: { TEAM: { "week": { opp, home } } } — a missing week = bye. Cached 7 days.
+async function fetchSched() {
+  const cached = cacheGet("dl_sched_v1", 7 * 24 * 3600e3);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+    const res = await fetch("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026?view=proTeamSchedules_wl");
+    if (!res.ok) throw new Error("Sched HTTP " + res.status);
+    const json = await res.json();
+    const teams = (json.settings && json.settings.proTeams) || [];
+    const fix = { WSH: "WAS", JAC: "JAX", OAK: "LV", SD: "LAC", STL: "LAR" }; // ESPN legacy codes → app codes
+    const abbrOf = {};
+    teams.forEach((t) => { const a = (t.abbrev || "").toUpperCase(); abbrOf[t.id] = fix[a] || a; });
+    const map = {};
+    teams.forEach((t) => {
+      const me = abbrOf[t.id];
+      if (!me || me === "FA") return;
+      map[me] = {};
+      const byWk = t.proGamesByScoringPeriod || {};
+      for (const wk in byWk) {
+        const g = byWk[wk] && byWk[wk][0];
+        if (!g) continue;
+        const home = g.homeProTeamId === t.id;
+        map[me][wk] = { opp: abbrOf[home ? g.awayProTeamId : g.homeProTeamId] || "?", home };
+      }
+    });
+    cacheSet("dl_sched_v1", map);
+    return { data: map, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback("dl_sched_v1", err); }
+}
+
 /* --------------------------- merge + auto-grading --------------------------- */
 // Fallback only — team abbrev normally comes from the Sleeper join.
 const PROTEAM = { 1:"ATL",2:"BUF",3:"CHI",4:"CIN",5:"CLE",6:"DAL",7:"DEN",8:"DET",9:"GB",10:"TEN",11:"IND",12:"KC",13:"LV",14:"LAR",15:"MIA",16:"MIN",17:"NE",18:"NO",19:"NYG",20:"NYJ",21:"PHI",22:"ARI",23:"PIT",24:"LAC",25:"SF",26:"SEA",27:"TB",28:"WAS",29:"CAR",30:"JAX",33:"BAL",34:"HOU" };
@@ -812,16 +842,26 @@ function loadMyTeam() {
 const LINEUP_OUT = { OUT: 1, IR: 1, PUP: 1, SUS: 1, COV: 1 }; // can't play; D/Q start but get flagged
 const SLOT_ELIG = { QB: ["QB"], RB: ["RB"], WR: ["WR"], TE: ["TE"], FLEX: ["RB", "WR", "TE"], SFLX: ["QB", "RB", "WR", "TE"], K: ["K"], DST: ["DST"] };
 
-// Optimal-ish weekly lineup: dedicated slots first, then FLEX/superflex, by projected points per
-// game. Preseason v1 honesty: ppg is season projection / 17 (2025 average as fallback) — weekly
-// opponent matchups aren't factored yet. Bye-week and ruled-out players are excluded up front.
-function buildLineup(roster, lg, week) {
+// Optimal-ish weekly lineup: dedicated slots first, then FLEX/superflex, by matchup-adjusted
+// points per game. Base ppg is season projection / 17 (2025 average as fallback); when the weekly
+// schedule is loaded, the opponent is shown and ppg is tilted ±8% by opponent strength (proxied
+// from the opponent DST's projection percentile — honest label, not a full DVOA). Byes come from
+// the real schedule when available (falling back to FantasyPros bye fields), and ruled-out
+// players are excluded up front.
+function buildLineup(roster, lg, week, sched, oppQOf) {
   const avail = [], sidelined = [];
   roster.forEach((p) => {
-    const ppg = Math.round(((p.proj > 0 ? p.proj / 17 : p.avg25 || 0)) * 10) / 10;
-    const onBye = week != null && p.bye === week;
+    const base = Math.round(((p.proj > 0 ? p.proj / 17 : p.avg25 || 0)) * 10) / 10;
+    const tmSched = sched && sched[p.tm];
+    const game = tmSched ? tmSched[String(week)] || null : undefined; // undefined = schedule unknown
+    const onBye = tmSched ? !game : week != null && p.bye === week;
     const isOut = !!LINEUP_OUT[p.inj];
-    (onBye || isOut ? sidelined : avail).push({ p, ppg, onBye, isOut });
+    let ppg = base, q = null;
+    if (game && oppQOf) {
+      q = oppQOf(game.opp); // 0..1, higher = tougher opposing defense
+      if (q != null) ppg = Math.round(base * (1 + (0.5 - q) * 0.16) * 10) / 10;
+    }
+    (onBye || isOut ? sidelined : avail).push({ p, ppg, base, game: game || null, q, onBye, isOut });
   });
   avail.sort((a, b) => b.ppg - a.ppg);
   const slots = [], used = new Set();
@@ -1754,6 +1794,56 @@ function SearchView({ players, marks, onMark }) {
   );
 }
 
+/* --------------------------- post-draft grade --------------------------- */
+// Self-calibrating: your starters' combined PAR vs what a league-average draft would net
+// (total PAR of the top starters-pool split evenly across teams). Ratio → letter.
+function gradeDraft(roster, lg, pool) {
+  if (!roster || !roster.length) return null;
+  const lineup = buildLineup(roster, lg, null, null, null);
+  const starters = lineup.slots.filter((s) => s.r);
+  const myPAR = starters.reduce((a, s) => a + Math.max(0, s.r.p.par || 0), 0);
+  const topN = pool.filter((p) => p.par != null).sort((a, b) => b.par - a.par).slice(0, lgStarters(lg) * lg.teams);
+  const expected = topN.reduce((a, p) => a + Math.max(0, p.par), 0) / lg.teams;
+  const ratio = expected > 0 ? myPAR / expected : 1;
+  const letterG = ratio >= 1.25 ? "A+" : ratio >= 1.12 ? "A" : ratio >= 1.03 ? "A-" : ratio >= 0.96 ? "B+" : ratio >= 0.88 ? "B" : ratio >= 0.8 ? "B-" : ratio >= 0.7 ? "C+" : ratio >= 0.6 ? "C" : "D";
+  const bullets = [];
+  const posPar = {};
+  roster.forEach((p) => { if (p.par > 0) posPar[p.pos] = (posPar[p.pos] || 0) + p.par; });
+  const ranked = Object.entries(posPar).sort((a, b) => b[1] - a[1]);
+  if (ranked.length) bullets.push(`Strength: ${ranked[0][0]} (+${Math.round(ranked[0][1])} PAR combined).`);
+  if (ranked.length > 1) {
+    const weak = ranked[ranked.length - 1];
+    if (weak[1] < ranked[0][1] * 0.3) bullets.push(`Thinnest: ${weak[0]}.`);
+  }
+  const val = roster.filter((p) => p.edge != null && p.edge >= 10).length;
+  if (val) bullets.push(`${val} value pick${val > 1 ? "s" : ""} beat ADP by 10+ spots.`);
+  const empty = [...new Set(lineup.slots.filter((s) => !s.r).map((s) => s.label))];
+  if (empty.length) bullets.push(`Unfilled starters: ${empty.join(", ")} — hit waivers.`);
+  const byes = {};
+  roster.forEach((p) => { if (p.bye) byes[p.bye] = (byes[p.bye] || 0) + 1; });
+  const wb = Object.entries(byes).sort((a, b) => b[1] - a[1])[0];
+  if (wb && wb[1] >= 3) bullets.push(`Bye pileup: ${wb[1]} players out week ${wb[0]}.`);
+  const cuffs = roster.filter((rb) => rb.pos === "RB" && rb.cuff && roster.some((x) => x.n === rb.cuff)).length;
+  if (cuffs) bullets.push(`${cuffs} handcuff pair${cuffs > 1 ? "s" : ""} secured.`);
+  const score = Math.round(Math.max(40, Math.min(99, 64 + (ratio - 0.95) * 90)));
+  return { letter: letterG, ratio, score, bullets, myPAR: Math.round(myPAR) };
+}
+function DraftRecap({ roster, lg, pool }) {
+  const g = gradeDraft(roster, lg, pool);
+  if (!g) return null;
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "center", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, margin: "12px 0", flexWrap: "wrap" }}>
+      <div style={{ textAlign: "center", flex: "none" }}>
+        <Gauge value={g.score} size={64} withLetter />
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 2, color: C.muted, marginTop: 2 }}>DRAFT GRADE</div>
+      </div>
+      <div style={{ flex: 1, minWidth: 240, fontSize: 13, color: C.chalk, lineHeight: 1.6 }}>
+        Your projected starters total <b style={{ color: C.good }}>+{g.myPAR} PAR</b> — {Math.round(g.ratio * 100)}% of a league-average draft haul. {g.bullets.join(" ")}
+      </div>
+    </div>
+  );
+}
+
 /* --------------------------- pick recommendation banner --------------------------- */
 function RecoBanner({ reco }) {
   if (!reco) return null;
@@ -1891,6 +1981,7 @@ function DraftView({ pool, lg, marks, onMark, onSaveTeam }) {
         ) : (
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 20 }}>
             <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, color: C.flag, letterSpacing: 1 }}>DRAFT COMPLETE</div>
+            <DraftRecap roster={myRoster} lg={lg} pool={pool} />
             <p style={{ color: C.muted, fontSize: 14 }}>Full board below. Save this roster to MY TEAM for weekly start/sit and waiver advice, or reset to try again.</p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {onSaveTeam && myRoster.length > 0 && (
@@ -2212,6 +2303,7 @@ function DraftTracker({ pool, lg, track, setTrack, marks, onMark, onSaveTeam }) 
             <>PICK {pickLabelOf(pickIdx, teams)} — {isMe ? <span style={{ color: C.flag }}>YOU'RE ON THE CLOCK</span> : `TEAM ${onClock + 1} IS PICKING`}</>
           )}
         </div>
+        {done && <DraftRecap roster={myRoster} lg={lg} pool={pool} />}
         {!done && (
           <div style={{ fontSize: 13, color: C.muted, margin: "2px 0 10px" }}>
             Your next pick: <b style={{ color: C.chalk }}>{pickLabelOf(myNext, teams)}</b> ({myNext - pickIdx} pick{myNext - pickIdx === 1 ? "" : "s"} away).
@@ -2439,7 +2531,15 @@ function CheatSheet({ graded, lg, marks }) {
 }
 
 /* --------------------------- my team view (start/sit + waivers) --------------------------- */
-function MyTeamView({ graded, lg, myTeam, setMyTeam, track }) {
+function MyTeamView({ graded, lg, myTeam, setMyTeam, track, sched }) {
+  // opponent-strength proxy: percentile of the opposing DST's projection (higher = tougher matchup)
+  const oppQOf = useMemo(() => {
+    const dsts = graded.filter((x) => x.pos === "DST" && x.proj > 0).sort((a, b) => a.proj - b.proj);
+    if (dsts.length < 8) return null;
+    const byTm = new Map();
+    dsts.forEach((d, i) => byTm.set(d.tm, i / (dsts.length - 1)));
+    return (tm) => (byTm.has(tm) ? byTm.get(tm) : null);
+  }, [graded]);
   const [week, setWeek] = useState(1);
   const [q, setQ] = useState("");
   const byId = useMemo(() => { const m = new Map(); graded.forEach((p) => m.set(p.id, p)); return m; }, [graded]);
@@ -2489,7 +2589,17 @@ function MyTeamView({ graded, lg, myTeam, setMyTeam, track }) {
       </div>
     );
 
-  const lineup = buildLineup(roster, lg, week);
+  const lineup = buildLineup(roster, lg, week, sched, oppQOf);
+  const matchChip = (r) => {
+    if (!r.game) return null;
+    const tag = r.q != null && r.q <= 0.22 ? ["SOFT", C.good] : r.q != null && r.q >= 0.78 ? ["TOUGH", C.risk] : null;
+    return (
+      <span style={{ fontSize: 11, color: C.muted }}>
+        {r.game.home ? "vs" : "@"} {r.game.opp}
+        {tag && <b style={{ color: tag[1], marginLeft: 4, letterSpacing: 0.5 }}>{tag[0]}</b>}
+      </span>
+    );
+  };
   const waivers = waiverTargets(graded, myTeam.ids || [], lg, lineup);
   const benchReason = (x) => {
     const elig = lineup.slots.filter((s) => s.r && SLOT_ELIG[s.label].includes(x.p.pos));
@@ -2528,7 +2638,7 @@ function MyTeamView({ graded, lg, myTeam, setMyTeam, track }) {
         </div>
       )}
       <p style={{ color: C.muted, fontSize: 12, margin: "0 0 14px" }}>
-        Preseason v1: per-game points are season projections ÷ 17 (2025 average as fallback) — weekly opponent matchups aren't factored yet. Byes and ruled-out players are handled.
+        Per-game points are season projections ÷ 17 (2025 average as fallback){sched ? ", tilted ±8% by opponent strength — proxied from the opposing defense's projection, an honest approximation, not film study. Byes come from the real NFL schedule" : ". Weekly schedule unavailable — byes fall back to FantasyPros data"}; ruled-out players are excluded.
       </p>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div style={{ flex: 2, minWidth: 320 }}>
@@ -2540,10 +2650,11 @@ function MyTeamView({ graded, lg, myTeam, setMyTeam, track }) {
                 {s.r ? (
                   <>
                     <span style={{ flex: 1 }}>
-                      {s.r.p.n} <span style={{ color: C.muted, fontSize: 12 }}>{s.r.p.pos} · {s.r.p.tm}{s.r.p.bye ? ` · bye ${s.r.p.bye}` : ""}</span>
+                      {s.r.p.n} <span style={{ color: C.muted, fontSize: 12 }}>{s.r.p.pos} · {s.r.p.tm}</span>{" "}
+                      {matchChip(s.r)}
                       {(s.r.p.inj === "Q" || s.r.p.inj === "D") && <Tag text={s.r.p.inj} color={C.warn} solid />}
                     </span>
-                    <b style={{ color: gradeColor(s.r.p.comp) }}>{s.r.ppg} ppg</b>
+                    <b style={{ color: gradeColor(s.r.p.comp) }} title={s.r.q != null && s.r.base !== s.r.ppg ? `${s.r.base} base, matchup-adjusted` : undefined}>{s.r.ppg} ppg</b>
                     <button onClick={() => removePlayer(s.r.p.id)} title="Drop from team" style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13 }}>✕</button>
                   </>
                 ) : (
@@ -2564,7 +2675,7 @@ function MyTeamView({ graded, lg, myTeam, setMyTeam, track }) {
             {lineup.sidelined.map((x) => (
               <div key={x.p.id} style={{ ...rowStyle, color: C.muted }}>
                 <span style={{ flex: 1, textDecoration: "line-through" }}>{x.p.n} <span style={{ fontSize: 12 }}>{x.p.pos} · {x.p.tm}</span></span>
-                <span style={{ color: C.risk, fontSize: 12, fontWeight: 700 }}>{x.onBye ? `BYE WK ${x.p.bye}` : x.p.inj}</span>
+                <span style={{ color: C.risk, fontSize: 12, fontWeight: 700 }}>{x.onBye ? `BYE WK ${x.p.bye || ""}`.trim() : x.p.inj}</span>
                 <button onClick={() => removePlayer(x.p.id)} title="Drop from team" style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13 }}>✕</button>
               </div>
             ))}
@@ -2790,6 +2901,7 @@ function DraftLab() {
     setTrackState(t);
     try { localStorage.setItem(TRACK_KEY, JSON.stringify(t)); } catch (e) {}
   };
+  const [sched, setSched] = useState(null); // weekly NFL schedule for matchup-aware start/sit
   const [myTeam, setMyTeamState] = useState(loadMyTeam);
   const setMyTeam = (t) => {
     setMyTeamState(t);
@@ -2808,8 +2920,9 @@ function DraftLab() {
     CACHE.quota = false;
     setStatus({ state: "loading", msg: "Fetching live player data…" });
     (async () => {
-      const [espnR, slpR, fpR, trR] = await Promise.allSettled([fetchEspn(), fetchSleeper(), fetchFp(lgCfg.scoring), fetchTrending()]);
+      const [espnR, slpR, fpR, trR, schR] = await Promise.allSettled([fetchEspn(), fetchSleeper(), fetchFp(lgCfg.scoring), fetchTrending(), fetchSched()]);
       if (!alive) return;
+      setSched(schR.status === "fulfilled" ? schR.value.data : null);
       const espn = espnR.status === "fulfilled" ? espnR.value : null;
       const slp = slpR.status === "fulfilled" ? slpR.value : null;
       const fp = fpR.status === "fulfilled" ? fpR.value : null;
@@ -2936,7 +3049,7 @@ function DraftLab() {
         ) : tab === "tracker" ? (
           <DraftTracker pool={data.pool} lg={lgCfg} track={track} setTrack={setTrack} marks={marks} onMark={onMark} onSaveTeam={saveTeam} />
         ) : tab === "team" ? (
-          <MyTeamView graded={data.graded} lg={lgCfg} myTeam={myTeam} setMyTeam={setMyTeam} track={track} />
+          <MyTeamView graded={data.graded} lg={lgCfg} myTeam={myTeam} setMyTeam={setMyTeam} track={track} sched={sched} />
         ) : tab === "method" ? (
           <MethodView graded={data.graded} lg={lgCfg} sosCfg={sosCfg} />
         ) : (
