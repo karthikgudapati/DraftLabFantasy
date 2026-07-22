@@ -1397,17 +1397,79 @@ function genOutlook(p) {
     return out;
   };
 
-  /* ---- assemble: vary the architecture per player, then flags + verdict ---- */
+  /* ---- assemble: vary the whole architecture per player so neighboring cards never rhyme.
+     Some summaries lead with the verdict, some with the sharpest stat angle, some with the
+     situation; the body order shuffles across six shapes and the verdict can land up front. ---- */
   const parts = { sit: sitSent, stat: statSent, mkt: mktSent };
-  const seq = hasStats
-    ? pkR(9, [["sit", "stat", "mkt"], ["stat", "sit", "mkt"], ["mkt", "sit", "stat"], ["sit", "stat", "mkt"]])
-    : pkR(9, [["sit", "stat", "mkt"], ["mkt", "sit", "stat"], ["sit", "mkt", "stat"]]);
+  const archPool = hasStats
+    ? [["sit", "stat", "mkt"], ["stat", "sit", "mkt"], ["mkt", "sit", "stat"], ["stat", "mkt", "sit"], ["sit", "mkt", "stat"], ["mkt", "stat", "sit"]]
+    : [["sit", "stat", "mkt"], ["mkt", "sit", "stat"], ["sit", "mkt", "stat"]];
+  const seq = pkR(9, archPool);
+
+  // verdict tied to the composite grade AND the price signal — computed first so it can lead
+  const verdict =
+    !p.proj ? pk(7, [
+      "Track his depth-chart movement through camp before spending anything to acquire him.",
+      "One to keep tabs on through August, nothing more yet.",
+      "File the name away; the data will say when it's time to act.",
+      "Watchlist material — nothing here demands a roster spot yet.",
+    ]) :
+    p.edge != null && p.edge < -15 && p.comp >= 72 ? pk(7, [
+      "The talent is real, but at today's price the model would let another manager pay the premium.",
+      "Great player, wrong price — let someone else make the reach.",
+      "If he slides a couple of rounds he's interesting; at the current cost, pass.",
+      "Paying full retail here means paying for the best case. The model doesn't.",
+    ]) :
+    p.edge != null && p.edge > 15 && p.comp >= 78 ? pk(7, [
+      "One of the model's favorite bargains on the board.",
+      "This is the kind of discount worth planning a draft around.",
+      "Circle him — value like this is how leagues get won in July.",
+      "The market is napping on him, and the model would happily take advantage.",
+    ]) :
+    p.comp >= 88 ? pk(7, [
+      "Draft him as a foundational piece.",
+      "Build your roster around him and don't overthink it.",
+      "He belongs in the first tier of your board, full stop.",
+      "As close to a no-questions pick as this position offers.",
+    ]) :
+    p.comp >= 80 ? pk(7, [
+      "The model sees a cornerstone-caliber pick at cost.",
+      "Worth taking a few picks before you feel comfortable.",
+      "A player you draft expecting to start every week without stress.",
+      "Not a headline pick — just one you'll quietly be glad you made.",
+    ]) :
+    p.comp >= 72 ? pk(7, [
+      "A dependable mid-round target.",
+      "A steady mid-round pick who won't sink your season.",
+      "Exactly the kind of unsexy pick that fills out a winning roster.",
+      "Fine at cost; better if he falls a round.",
+    ]) :
+    p.comp >= 62 ? pk(7, [
+      "A late-round dart with a definable path to relevance.",
+      "Worth a late flier if the fit makes sense for your roster.",
+      "Cheap enough that the upside case is the only case that matters.",
+      "A name for the last rounds, when process beats certainty.",
+    ]) :
+    "Only rosterable if the situation around him changes.";
+
+  const mix = seed + (p.rank || 0);
+  const verdictFirst = p.proj > 0 && mix % 4 === 0;           // every ~4th card leads with the call
+  const angleLead = !verdictFirst && angleTexts.length > 0 && mix % 3 === 0; // others open on the sharpest stat
 
   const sent = [];
+  if (verdictFirst) {
+    sent.push(`${pk(18, ["The short version:", "Bottom line first:", "The call:", "Verdict up front:"])} ${verdict.charAt(0).toLowerCase()}${verdict.slice(1)}`);
+  }
+  let angleQueue = angleTexts.slice();
+  if (angleLead) {
+    sent.push(angleQueue[0].replace(/^He /, `${last} `)); // opener gets the name, not a floating pronoun
+    angleQueue = angleQueue.slice(1);
+  }
   seq.forEach((k, i) => {
-    sent.push(parts[k](i === 0));
-    if (k === "stat") angleTexts.forEach((t) => sent.push(t));
+    sent.push(parts[k](i === 0 && !angleLead));
+    if (k === "stat" && angleQueue.length) { angleQueue.forEach((t) => sent.push(t)); angleQueue = []; }
   });
+  if (angleQueue.length) angleQueue.forEach((t) => sent.push(t)); // statless shapes still get their angles
 
   // risk flags
   const flags = [];
@@ -1420,47 +1482,9 @@ function genOutlook(p) {
   }
   if (p.pos === "RB" && p.age >= 28) flags.push(`at ${p.age} he's on the wrong side of the running back aging curve`);
   if (p.trending) flags.push(`he's been one of the most-added players in fantasy over the past day, so news may be moving`);
-  if (flags.length) sent.push(`${pk(6, ["The fine print:", "The caveats:", "What could go wrong:", "Before you draft him, know this:"])} ${flags.join("; ")}.`);
+  if (flags.length) sent.push(`${pk(6, ["The fine print:", "The caveats:", "What could go wrong:", "Before you draft him, know this:", "Two eyes open, though:", "Worth flagging:"])} ${flags.join("; ")}.`);
 
-  // verdict tied to the composite grade AND the price signal
-  sent.push(
-    !p.proj ? pk(7, [
-      "Track his depth-chart movement through camp before spending anything to acquire him.",
-      "One to keep tabs on through August, nothing more yet.",
-      "File the name away; the data will say when it's time to act.",
-    ]) :
-    p.edge != null && p.edge < -15 && p.comp >= 72 ? pk(7, [
-      "The talent is real, but at today's price the model would let another manager pay the premium.",
-      "Great player, wrong price — let someone else make the reach.",
-      "If he slides a couple of rounds he's interesting; at the current cost, pass.",
-    ]) :
-    p.edge != null && p.edge > 15 && p.comp >= 78 ? pk(7, [
-      "One of the model's favorite bargains on the board.",
-      "This is the kind of discount worth planning a draft around.",
-      "Circle him — value like this is how leagues get won in July.",
-    ]) :
-    p.comp >= 88 ? pk(7, [
-      "Draft him as a foundational piece.",
-      "Build your roster around him and don't overthink it.",
-      "He belongs in the first tier of your board, full stop.",
-    ]) :
-    p.comp >= 80 ? pk(7, [
-      "The model sees a cornerstone-caliber pick at cost.",
-      "Worth taking a few picks before you feel comfortable.",
-      "A player you draft expecting to start every week without stress.",
-    ]) :
-    p.comp >= 72 ? pk(7, [
-      "A dependable mid-round target.",
-      "A steady mid-round pick who won't sink your season.",
-      "Exactly the kind of unsexy pick that fills out a winning roster.",
-    ]) :
-    p.comp >= 62 ? pk(7, [
-      "A late-round dart with a definable path to relevance.",
-      "Worth a late flier if the fit makes sense for your roster.",
-      "Cheap enough that the upside case is the only case that matters.",
-    ]) :
-    "Only rosterable if the situation around him changes."
-  );
+  if (!verdictFirst) sent.push(verdict);
 
   return sent.join(" ");
 }
