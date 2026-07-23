@@ -1,0 +1,3053 @@
+import { useState, useMemo, useEffect } from "react";
+
+/* ------------------------------------------------------------------
+   DRAFT LAB — factor-based fantasy football prototype
+   LIVE DATA EDITION:
+   - ESPN fantasy API: player pool w/ live ADP, 2026 projections, injury status
+   - Sleeper API: full roster pool, depth charts, injury detail, trending adds
+   - FantasyPros: expert-consensus tiers + bye weeks
+   Hand-curated factor grades are kept for scouted players; everyone else
+   is auto-graded from live data (projection percentile, depth chart,
+   team environment, injury status).
+------------------------------------------------------------------- */
+
+const C = {
+  turf: "#0F2318",
+  panel: "#1B3526",
+  panelLight: "#24422F",
+  line: "#33543F",
+  chalk: "#F2EFE6",
+  muted: "#8FAE9A",
+  flag: "#FFD447",
+  risk: "#E4572E",
+  good: "#7BD389",
+  warn: "#FFD447",
+};
+
+const FONT_DISPLAY = "'Barlow Condensed','Arial Narrow',sans-serif";
+const FONT_BODY = "'Barlow',system-ui,sans-serif";
+
+// factors: scheme fit, offense environment, position competition (higher = clearer path),
+// strength of schedule (higher = easier), durability (higher = safer), handcuff value (RB)
+const CURATED = [
+  { n: "Ja'Marr Chase", pos: "WR", tm: "CIN", adp: 1, f: { sch: 96, off: 92, cmp: 90, sos: 74, dur: 88 }, note: "Alpha target share in a pass-first scheme. Volume is scheme-driven, not game-script-driven." },
+  { n: "Bijan Robinson", pos: "RB", tm: "ATL", adp: 2, f: { sch: 93, off: 84, cmp: 88, sos: 78, dur: 90, hc: 55 }, note: "Zone-run scheme built around him; receiving role locked in. Handcuff matters little — the offense funnels through him.", cuff: "Tyler Allgeier" },
+  { n: "Justin Jefferson", pos: "WR", tm: "MIN", adp: 3, f: { sch: 95, off: 82, cmp: 86, sos: 70, dur: 82 }, note: "Elite regardless of QB, but QB volatility caps the ceiling slightly vs. Chase." },
+  { n: "Saquon Barkley", pos: "RB", tm: "PHI", adp: 4, f: { sch: 92, off: 95, cmp: 84, sos: 72, dur: 74, hc: 62 }, note: "Best O-line environment in football. Age + workload history is the only real discount.", cuff: "Will Shipley" },
+  { n: "Jahmyr Gibbs", pos: "RB", tm: "DET", adp: 5, f: { sch: 94, off: 93, cmp: 68, sos: 76, dur: 86, hc: 78 }, note: "Explosive in a top offense, but a true committee suppresses weekly floor. New OC is the swing factor.", cuff: "David Montgomery" },
+  { n: "CeeDee Lamb", pos: "WR", tm: "DAL", adp: 6, f: { sch: 88, off: 78, cmp: 74, sos: 71, dur: 90 }, note: "Target competition rose with a real WR2 in town — slight target-share haircut priced in here, not in ADP." },
+  { n: "Puka Nacua", pos: "WR", tm: "LAR", adp: 7, f: { sch: 92, off: 85, cmp: 80, sos: 75, dur: 70 }, note: "Scheme darling — condensed formations feed him. Knee history is the tax." },
+  { n: "Amon-Ra St. Brown", pos: "WR", tm: "DET", adp: 8, f: { sch: 90, off: 93, cmp: 76, sos: 76, dur: 92 }, note: "Slot volume is matchup-proof. Iron-man durability profile." },
+  { n: "Christian McCaffrey", pos: "RB", tm: "SF", adp: 9, f: { sch: 95, off: 86, cmp: 82, sos: 73, dur: 52, hc: 88 }, note: "Highest scheme fit at RB, worst injury profile in round one. His handcuff is a top-10 pick's insurance policy.", cuff: "Jordan Mason" },
+  { n: "Ashton Jeanty", pos: "RB", tm: "LV", adp: 10, f: { sch: 82, off: 62, cmp: 92, sos: 68, dur: 85, hc: 48 }, note: "Workhorse path is wide open; the offense around him is the problem. Volume vs. environment bet.", cuff: "Zamir White" },
+  { n: "Malik Nabers", pos: "WR", tm: "NYG", adp: 11, f: { sch: 84, off: 60, cmp: 90, sos: 66, dur: 80 }, note: "Target hog on a bad offense — classic high-volume, low-efficiency profile. TD upside capped." },
+  { n: "Nico Collins", pos: "WR", tm: "HOU", adp: 12, f: { sch: 89, off: 83, cmp: 78, sos: 77, dur: 72 }, note: "Per-route monster; soft-tissue history is why he slides in drafts." },
+  { n: "Derrick Henry", pos: "RB", tm: "BAL", adp: 13, f: { sch: 91, off: 90, cmp: 80, sos: 70, dur: 88, hc: 70 }, note: "Gravity of the QB run game keeps boxes light. Age cliff is real but hasn't arrived.", cuff: "Justice Hill" },
+  { n: "Brian Thomas Jr.", pos: "WR", tm: "JAX", adp: 14, f: { sch: 90, off: 74, cmp: 85, sos: 79, dur: 87 }, note: "New play-caller schemes him downfield; clear WR1 role. Offense grade is the swing." },
+  { n: "De'Von Achane", pos: "RB", tm: "MIA", adp: 15, f: { sch: 93, off: 80, cmp: 72, sos: 74, dur: 66, hc: 74 }, note: "Speed-scheme perfect fit; size/durability caps carries, so the receiving role carries the profile.", cuff: "Jaylen Wright" },
+  { n: "A.J. Brown", pos: "WR", tm: "PHI", adp: 16, f: { sch: 78, off: 88, cmp: 76, sos: 72, dur: 78 }, note: "Run-heavy scheme suppresses target volume. Great player, mediocre fantasy environment." },
+  { n: "Drake London", pos: "WR", tm: "ATL", adp: 17, f: { sch: 86, off: 84, cmp: 82, sos: 78, dur: 85 }, note: "QB stability plus red-zone role. Quietly one of the safest WR profiles on the board." },
+  { n: "Josh Jacobs", pos: "RB", tm: "GB", adp: 18, f: { sch: 87, off: 85, cmp: 83, sos: 69, dur: 82, hc: 58 }, note: "Bell-cow usage in a good offense; schedule is the knock.", cuff: "MarShawn Lloyd" },
+  { n: "Brock Bowers", pos: "TE", tm: "LV", adp: 19, f: { sch: 88, off: 62, cmp: 92, sos: 68, dur: 90 }, note: "Positional edge is massive — he's the offense's only reliable target. Bad-offense tax already applied." },
+  { n: "Bucky Irving", pos: "RB", tm: "TB", adp: 20, f: { sch: 90, off: 82, cmp: 75, sos: 76, dur: 84, hc: 66 }, note: "Earned the backfield late last year; new OC continuity is the question mark.", cuff: "Rachaad White" },
+  { n: "Chase Brown", pos: "RB", tm: "CIN", adp: 22, f: { sch: 85, off: 90, cmp: 79, sos: 74, dur: 80, hc: 52 }, note: "Attached to an elite offense with little competition behind him.", cuff: "Zack Moss" },
+  { n: "Tee Higgins", pos: "WR", tm: "CIN", adp: 24, f: { sch: 87, off: 92, cmp: 70, sos: 74, dur: 64 }, note: "Elite offense, but WR2 role plus annual soft-tissue issues make him a ceiling-over-floor pick." },
+  { n: "Ladd McConkey", pos: "WR", tm: "LAC", adp: 25, f: { sch: 91, off: 76, cmp: 84, sos: 73, dur: 78 }, note: "Scheme feeds the slot; run-first identity caps total volume." },
+  { n: "Josh Allen", pos: "QB", tm: "BUF", adp: 26, f: { sch: 94, off: 90, cmp: 95, sos: 72, dur: 92 }, note: "Rushing floor makes him matchup-proof. The safest early QB investment." },
+  { n: "Lamar Jackson", pos: "QB", tm: "BAL", adp: 27, f: { sch: 95, off: 90, cmp: 95, sos: 70, dur: 80 }, note: "Highest ceiling at the position; slightly more missed-time risk than Allen." },
+  { n: "Kyren Williams", pos: "RB", tm: "LAR", adp: 28, f: { sch: 84, off: 85, cmp: 62, sos: 75, dur: 76, hc: 82 }, note: "Coaches love him, but a drafted challenger makes this the most fragile 'workhorse' role in the top 30.", cuff: "Blake Corum" },
+  { n: "Kenneth Walker III", pos: "RB", tm: "SEA", adp: 30, f: { sch: 88, off: 74, cmp: 73, sos: 74, dur: 68, hc: 72 }, note: "New scheme is a genuine fit for his style; health has never held for 17 games.", cuff: "Zach Charbonnet" },
+  { n: "Jaxon Smith-Njigba", pos: "WR", tm: "SEA", adp: 31, f: { sch: 89, off: 74, cmp: 88, sos: 74, dur: 88 }, note: "Target-share breakout is scheme-driven and sticky. Offense grade is the cap." },
+  { n: "Trey McBride", pos: "TE", tm: "ARI", adp: 32, f: { sch: 87, off: 78, cmp: 90, sos: 77, dur: 86 }, note: "Target volume of a WR1. TD luck is the only thing that's lagged." },
+  { n: "James Cook", pos: "RB", tm: "BUF", adp: 34, f: { sch: 82, off: 90, cmp: 70, sos: 72, dur: 85, hc: 60 }, note: "Great offense, but goal-line work rotates — TD equity is shared with his QB.", cuff: "Ray Davis" },
+  { n: "Omarion Hampton", pos: "RB", tm: "LAC", adp: 36, f: { sch: 90, off: 76, cmp: 74, sos: 73, dur: 88, hc: 64 }, note: "Run-first coaching staff drafted him to pound the rock; veteran ahead of him is the early-season tax.", cuff: "Najee Harris" },
+  { n: "Davante Adams", pos: "WR", tm: "LAR", adp: 38, f: { sch: 88, off: 85, cmp: 72, sos: 75, dur: 76 }, note: "Scheme resurrects route-runners; age and target competition split the pie." },
+  { n: "Garrett Wilson", pos: "WR", tm: "NYJ", adp: 39, f: { sch: 80, off: 64, cmp: 86, sos: 71, dur: 89 }, note: "Talent has never been the question — the offense has. Volume keeps him startable." },
+  { n: "Jayden Daniels", pos: "QB", tm: "WAS", adp: 40, f: { sch: 93, off: 84, cmp: 95, sos: 73, dur: 78 }, note: "Konami-code rushing production. Slight frame concern is the only durability flag." },
+  { n: "Breece Hall", pos: "RB", tm: "NYJ", adp: 42, f: { sch: 78, off: 64, cmp: 66, sos: 71, dur: 74, hc: 70 }, note: "Committee talk plus a bad offense — the model is out on him at cost.", cuff: "Braelon Allen" },
+  { n: "Rashee Rice", pos: "WR", tm: "KC", adp: 44, f: { sch: 92, off: 86, cmp: 72, sos: 72, dur: 68 }, note: "When active, the scheme funnels him targets. Availability (health + off-field) is the entire question." },
+  { n: "George Kittle", pos: "TE", tm: "SF", adp: 46, f: { sch: 90, off: 86, cmp: 85, sos: 73, dur: 74 }, note: "Still the most scheme-valuable TE alive; misses a few games every year." },
+  { n: "DK Metcalf", pos: "WR", tm: "PIT", adp: 48, f: { sch: 74, off: 70, cmp: 84, sos: 69, dur: 90 }, note: "New team, low-volume pass offense. Durability is elite; opportunity is not." },
+  { n: "TreVeyon Henderson", pos: "RB", tm: "NE", adp: 50, f: { sch: 86, off: 70, cmp: 70, sos: 77, dur: 84, hc: 68 }, note: "Explosive receiving back in an ascending offense; early-down split caps year-one volume.", cuff: "Rhamondre Stevenson" },
+  { n: "Tetairoa McMillan", pos: "WR", tm: "CAR", adp: 52, f: { sch: 84, off: 66, cmp: 88, sos: 76, dur: 86 }, note: "Instant alpha role for a rookie; QB development decides the ceiling." },
+  { n: "Joe Burrow", pos: "QB", tm: "CIN", adp: 54, f: { sch: 90, off: 92, cmp: 95, sos: 74, dur: 70 }, note: "Best pure-passing environment in fantasy; no rushing floor, real injury history." },
+  { n: "Sam LaPorta", pos: "TE", tm: "DET", adp: 56, f: { sch: 84, off: 93, cmp: 74, sos: 76, dur: 88 }, note: "Great offense, crowded target tree. Fine value at cost, not a target-hog TE." },
+  { n: "Tony Pollard", pos: "RB", tm: "TEN", adp: 60, f: { sch: 76, off: 58, cmp: 76, sos: 75, dur: 82, hc: 56 }, note: "Volume-based RB2 on a rebuilding offense. Cheap, boring, playable.", cuff: "Tyjae Spears" },
+  { n: "Jordan Mason", pos: "RB", tm: "MIN", adp: 66, f: { sch: 88, off: 82, cmp: 58, sos: 70, dur: 84, hc: 40 }, note: "Scheme fit is excellent; role is the problem. A high-value handcuff you can start in a pinch.", cuff: "Aaron Jones" },
+  { n: "Jaylen Warren", pos: "RB", tm: "PIT", adp: 68, f: { sch: 85, off: 70, cmp: 64, sos: 69, dur: 80, hc: 44 }, note: "Efficiency star finally getting lead-back run; offense caps the ceiling.", cuff: "Kaleb Johnson" },
+  { n: "Tyler Allgeier", pos: "RB", tm: "ATL", adp: 110, f: { sch: 82, off: 84, cmp: 40, sos: 78, dur: 90, hc: 30 }, note: "Pure handcuff: near-zero standalone value, league-winning if the starter goes down.", cuff: "—" },
+  { n: "David Montgomery", pos: "RB", tm: "DET", adp: 72, f: { sch: 88, off: 93, cmp: 60, sos: 76, dur: 82, hc: 50 }, note: "Half of an elite committee with standalone TD value — the rare handcuff-ish back who's startable anyway.", cuff: "Jahmyr Gibbs" },
+  { n: "Blake Corum", pos: "RB", tm: "LAR", adp: 120, f: { sch: 86, off: 85, cmp: 42, sos: 75, dur: 88, hc: 28 }, note: "The model's favorite pure handcuff: elite offense, one injury from a workhorse role.", cuff: "—" },
+];
+
+const WEIGHTS = { sch: 0.24, off: 0.24, cmp: 0.2, sos: 0.1, dur: 0.22 };
+// Honest labels for what each bar actually measures. Two are hard signals (Schedule = fftoolbox
+// SoS, Availability = injury/age); the other three are projection-derived proxies, labelled as such.
+// Scouted players carry hand grades in these same slots.
+const FACTOR_META = [
+  ["sch", "Projected Output", "Where this player's 2026 projection ranks at his position — higher means more projected fantasy points. (Scouted players carry a hand output grade.)"],
+  ["off", "Offense Strength", "Quality of the surrounding offense, derived from the team's total projected fantasy output."],
+  ["cmp", "Role & Volume", "How locked-in the workload looks, from live depth-chart standing. (Scouted players carry a hand role grade.)"],
+  ["sos", "Schedule", "2026 fantasy strength of schedule — fftoolbox rank of the team's slate at this position, over the weeks set in SCHEDULE GRADE. A hard signal, not a projection."],
+  ["dur", "Availability", "Durability outlook from current injury status and age. A hard signal, not a projection."],
+];
+
+const composite = (p) => {
+  let s = 0;
+  for (const k in WEIGHTS) s += p.f[k] * WEIGHTS[k];
+  return Math.round(s);
+};
+
+// Expert-consensus grade from FantasyPros overall ECR (lower rank = higher grade), same 64-97 curve.
+const ecrGradeOf = (ecr) => (ecr && ecr > 0 && ecr <= 400 ? 64 + 33 * Math.exp(-ecr / 60) : null);
+
+// Value-anchored grade. The backbone is PAR — projected points above the last league-wide
+// starter at the position — so the grade (and the model rank it drives) reflects real
+// cross-position value. That projection value is then BLENDED with FantasyPros expert-consensus
+// rank (65/35) so no single source's bias runs the board, and nudged a few points by the hard
+// factors (availability, schedule via the tilt on hand/auto factors). K/DST stay in a compressed
+// low band (no ECR blend, so a kicker's early K-rank can't inflate them back into the top rounds).
+// Players with no 2026 projection lean on ECR if ranked, else factors. Needs p.par + p.ecr, so it
+// runs inside buildLive.
+const BLEND_PROJ_W = 0.65; // projection weight; the rest is expert consensus
+function valueGradeOf(p) {
+  const f = p.f || {};
+  const tilt = (f.dur != null ? (f.dur - 78) * 0.05 : 0)
+             + (f.sch != null ? (f.sch - 75) * 0.04 : 0)
+             + (f.off != null ? (f.off - 75) * 0.025 : 0);
+  if (p.pos === "K" || p.pos === "DST") {
+    const base = 48 + Math.min(14, Math.max(0, p.par || 0));
+    return Math.round(Math.max(42, Math.min(63, base + tilt)));
+  }
+  const eg = ecrGradeOf(p.ecr);
+  if (p.par == null) {
+    if (eg != null) return Math.round(Math.max(40, Math.min(85, eg + tilt)));
+    return Math.round(Math.max(38, Math.min(58, 44 + ((composite(p) || 55) - 60) * 0.35)));
+  }
+  let g = (p.par < 0 ? 64 + p.par * 0.5 : 64 + 33 * (1 - Math.exp(-p.par / 55))) + tilt;
+  if (eg != null) g = BLEND_PROJ_W * g + (1 - BLEND_PROJ_W) * eg; // consensus of projections + experts
+  return Math.round(Math.max(40, Math.min(99, g)));
+}
+
+const gradeColor = (v) => (v >= 85 ? C.good : v >= 72 ? C.warn : C.risk);
+const letter = (v) => (v >= 93 ? "A+" : v >= 88 ? "A" : v >= 83 ? "A-" : v >= 78 ? "B+" : v >= 73 ? "B" : v >= 68 ? "B-" : v >= 62 ? "C+" : v >= 55 ? "C" : "D");
+
+/* --------------------------- live data layer --------------------------- */
+const LS = { sleeper: "dl_sleeper_v5", espn: "dl_espn_v5", fp: "dl_fp_v3", trend: "dl_trend_v2" };
+const TTL = { sleeper: 24 * 3600e3, espn: 3600e3, fp: 6 * 3600e3, trend: 3600e3 };
+
+const CACHE = { quota: false }; // set when a localStorage write is rejected (e.g. quota exceeded)
+function cacheGet(key, ttl) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || Date.now() - obj.ts > ttl) return null;
+    return obj; // { ts, data }
+  } catch (e) { return null; }
+}
+function cacheSet(key, data) {
+  try { localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data })); return true; }
+  catch (e) { CACHE.quota = true; return false; } // quota — data stays for this session, re-fetches next load
+}
+function cacheGetStale(key) { // ignores TTL — last-known-good for the offline / wifi-hiccup case
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+// on a failed fetch, serve the expired cache if we have one rather than dropping to sample data
+function staleFallback(key, err) {
+  const s = cacheGetStale(key);
+  if (s && s.data) return { data: s.data, fromCache: true, stale: true, ts: s.ts };
+  throw err;
+}
+
+const OFF_POS = { QB: 1, RB: 1, WR: 1, TE: 1, K: 1 };
+
+// Sleeper: full player pool. 14.6MB payload — Sleeper asks for at most one fetch/day, so cache a slimmed copy.
+async function fetchSleeper() {
+  try { localStorage.removeItem("dl_sleeper_v3"); localStorage.removeItem("dl_sleeper_v4"); localStorage.removeItem("dl_espn_v4"); localStorage.removeItem("dl_fp_v2"); } catch (e) {} // reclaim quota from old cache versions
+  const cached = cacheGet(LS.sleeper, TTL.sleeper);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+    const res = await fetch("https://api.sleeper.app/v1/players/nfl");
+    if (!res.ok) throw new Error("Sleeper HTTP " + res.status);
+    const all = await res.json();
+    const slim = [];
+    for (const id in all) {
+      const p = all[id];
+      if (!p || !OFF_POS[p.position] || p.status !== "Active" || !p.team || !p.full_name) continue;
+      slim.push({
+        id, name: p.full_name, pos: p.position, team: p.team,
+        inj: p.injury_status || "", injPart: p.injury_body_part || "", notes: p.injury_notes || "",
+        depth: p.depth_chart_order || null, age: p.age || null, exp: p.years_exp,
+        espn: p.espn_id || null, sr: p.search_rank || null,
+        ht: p.height || null, wt: p.weight || null, col: p.college || null,
+      });
+    }
+    cacheSet(LS.sleeper, slim);
+    return { data: slim, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback(LS.sleeper, err); }
+}
+
+// ESPN: ADP + 2026 season projections + injury status. X-Fantasy-Filter header is mandatory (else 50 players).
+const ESPN_POS = { 1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST" };
+const ESPN_FILTER = JSON.stringify({
+  players: {
+    limit: 1400,
+    filterSlotIds: { value: [0, 2, 4, 6, 17, 16] },
+    filterStatsForSplitTypeIds: { value: [0] },
+    sortDraftRanks: { sortPriority: 100, sortAsc: true, value: "PPR" },
+  },
+});
+async function fetchEspn() {
+  const cached = cacheGet(LS.espn, TTL.espn);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+  const res = await fetch(
+    "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leaguedefaults/3?view=kona_player_info",
+    { headers: { "x-fantasy-filter": ESPN_FILTER } }
+  );
+  if (!res.ok) throw new Error("ESPN HTTP " + res.status);
+  const json = await res.json();
+  const slim = (json.players || [])
+    .map((e) => e.player || e)
+    .filter((p) => p && ESPN_POS[p.defaultPositionId] && p.fullName)
+    .map((p) => {
+      const proj = (p.stats || []).find((s) => s && s.id === "102026");
+      const act = (p.stats || []).find((s) => s && s.id === "002025"); // 2025 season actuals
+      const own = p.ownership || {};
+      // stat ids: QB 0 att/1 comp/3 yds/4 TD/20 INT · rush 23 att/24 yds/25 TD · rec 58 tgt/53 rec/42 yds/43 TD
+      let s25 = null;
+      if (act && act.stats) {
+        s25 = {};
+        [0, 1, 3, 4, 20, 23, 24, 25, 42, 43, 53, 58].forEach((k) => {
+          const v = act.stats[k];
+          if (v) s25[k] = Math.round(v);
+        });
+        if (Object.keys(s25).length === 0) s25 = null;
+      }
+      return {
+        espn: p.id, name: p.fullName, pos: ESPN_POS[p.defaultPositionId], teamId: p.proTeamId,
+        inj: p.injuryStatus || "", injd: !!p.injured, adp: own.averageDraftPosition || null,
+        auc: own.auctionValueAverage || null, proj: proj && proj.appliedTotal ? proj.appliedTotal : 0,
+        projRec: proj && proj.stats && proj.stats[53] ? proj.stats[53] : 0,
+        pts25: act && act.appliedTotal ? Math.round(act.appliedTotal * 10) / 10 : 0,
+        avg25: act && act.appliedAverage ? Math.round(act.appliedAverage * 10) / 10 : 0,
+        s25,
+      };
+    });
+  cacheSet(LS.espn, slim);
+  return { data: slim, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback(LS.espn, err); }
+}
+
+// FantasyPros keyless partners endpoint: expert-consensus rank + tier + bye week.
+async function fetchFp(scoring) {
+  const sc = scoring === "HALF" ? "HALF" : scoring === "STD" ? "STD" : "PPR";
+  const key = LS.fp + "_" + sc;
+  const cached = cacheGet(key, TTL.fp);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+    const res = await fetch(
+      "https://partners.fantasypros.com/api/v1/consensus-rankings.php?sport=NFL&year=2026&week=0&position=ALL&type=ST&scoring=" + sc + "&export=json"
+    );
+    if (!res.ok) throw new Error("FantasyPros HTTP " + res.status);
+    const json = await res.json();
+    const slim = (json.players || []).map((p) => ({
+      name: p.player_name, pos: p.player_position_id, team: p.player_team_id,
+      ecr: p.rank_ecr, tier: p.tier, bye: p.player_bye_week, posRank: p.pos_rank,
+    }));
+    cacheSet(key, slim);
+    return { data: slim, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback(key, err); }
+}
+
+// Sleeper trending adds (last 24h) — "news just broke" signal.
+async function fetchTrending() {
+  const cached = cacheGet(LS.trend, TTL.trend);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+    const res = await fetch("https://api.sleeper.app/v1/players/nfl/trending/add?lookback_hours=24&limit=25");
+    if (!res.ok) throw new Error("Trending HTTP " + res.status);
+    const json = await res.json();
+    const slim = (json || []).map((t) => String(t.player_id));
+    cacheSet(LS.trend, slim);
+    return { data: slim, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback(LS.trend, err); }
+}
+
+// Weekly NFL schedule: { TEAM: { "week": { opp, home } } } — a missing week = bye. Cached 7 days.
+async function fetchSched() {
+  const cached = cacheGet("dl_sched_v1", 7 * 24 * 3600e3);
+  if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  try {
+    const res = await fetch("https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026?view=proTeamSchedules_wl");
+    if (!res.ok) throw new Error("Sched HTTP " + res.status);
+    const json = await res.json();
+    const teams = (json.settings && json.settings.proTeams) || [];
+    const fix = { WSH: "WAS", JAC: "JAX", OAK: "LV", SD: "LAC", STL: "LAR" }; // ESPN legacy codes → app codes
+    const abbrOf = {};
+    teams.forEach((t) => { const a = (t.abbrev || "").toUpperCase(); abbrOf[t.id] = fix[a] || a; });
+    const map = {};
+    teams.forEach((t) => {
+      const me = abbrOf[t.id];
+      if (!me || me === "FA") return;
+      map[me] = {};
+      const byWk = t.proGamesByScoringPeriod || {};
+      for (const wk in byWk) {
+        const g = byWk[wk] && byWk[wk][0];
+        if (!g) continue;
+        const home = g.homeProTeamId === t.id;
+        map[me][wk] = { opp: abbrOf[home ? g.awayProTeamId : g.homeProTeamId] || "?", home };
+      }
+    });
+    cacheSet("dl_sched_v1", map);
+    return { data: map, fromCache: false, ts: Date.now() };
+  } catch (err) { return staleFallback("dl_sched_v1", err); }
+}
+
+/* --------------------------- merge + auto-grading --------------------------- */
+// Fallback only — team abbrev normally comes from the Sleeper join.
+const PROTEAM = { 1:"ATL",2:"BUF",3:"CHI",4:"CIN",5:"CLE",6:"DAL",7:"DEN",8:"DET",9:"GB",10:"TEN",11:"IND",12:"KC",13:"LV",14:"LAR",15:"MIA",16:"MIN",17:"NE",18:"NO",19:"NYG",20:"NYJ",21:"PHI",22:"ARI",23:"PIT",24:"LAC",25:"SF",26:"SEA",27:"TB",28:"WAS",29:"CAR",30:"JAX",33:"BAL",34:"HOU" };
+
+// 2026 fantasy strength-of-schedule ranks per team+position (1 = easiest slate, 32 = hardest),
+// one table per week window: e = full season, a-d = regular-season splits, f/g/h/m/n = playoff splits.
+// Source: fftoolbox.fulltimefantasy.com, extracted 2026-07-19.
+// The site has no CORS/API so this is baked in; the NFL schedule is fixed for the season.
+const SOS_TABLES = {
+  e: {
+    ARI: { QB: 16, RB: 24, WR: 13, TE: 30, K: 15, DST: 25 },
+    ATL: { QB: 14, RB: 15, WR: 17, TE: 3, K: 11, DST: 15 },
+    BAL: { QB: 17, RB: 12, WR: 22, TE: 4, K: 23, DST: 5 },
+    BUF: { QB: 30, RB: 32, WR: 21, TE: 20, K: 32, DST: 3 },
+    CAR: { QB: 21, RB: 29, WR: 24, TE: 14, K: 14, DST: 27 },
+    CHI: { QB: 28, RB: 26, WR: 27, TE: 27, K: 31, DST: 29 },
+    CIN: { QB: 7, RB: 28, WR: 6, TE: 7, K: 8, DST: 20 },
+    CLE: { QB: 3, RB: 9, WR: 4, TE: 5, K: 1, DST: 12 },
+    DAL: { QB: 9, RB: 7, WR: 9, TE: 19, K: 26, DST: 32 },
+    DEN: { QB: 25, RB: 21, WR: 23, TE: 17, K: 30, DST: 2 },
+    DET: { QB: 19, RB: 6, WR: 19, TE: 24, K: 4, DST: 11 },
+    GB: { QB: 18, RB: 22, WR: 15, TE: 31, K: 24, DST: 17 },
+    HOU: { QB: 5, RB: 13, WR: 5, TE: 12, K: 6, DST: 26 },
+    IND: { QB: 10, RB: 11, WR: 16, TE: 13, K: 27, DST: 9 },
+    JAX: { QB: 6, RB: 19, WR: 8, TE: 11, K: 22, DST: 23 },
+    KC: { QB: 29, RB: 25, WR: 30, TE: 8, K: 12, DST: 7 },
+    LAC: { QB: 22, RB: 20, WR: 25, TE: 21, K: 29, DST: 4 },
+    LAR: { QB: 12, RB: 1, WR: 18, TE: 28, K: 9, DST: 22 },
+    LV: { QB: 32, RB: 30, WR: 32, TE: 16, K: 19, DST: 8 },
+    MIA: { QB: 26, RB: 16, WR: 28, TE: 25, K: 5, DST: 6 },
+    MIN: { QB: 8, RB: 14, WR: 7, TE: 10, K: 17, DST: 30 },
+    NE: { QB: 24, RB: 27, WR: 26, TE: 29, K: 21, DST: 14 },
+    NO: { QB: 13, RB: 3, WR: 11, TE: 15, K: 2, DST: 13 },
+    NYG: { QB: 4, RB: 10, WR: 2, TE: 9, K: 16, DST: 28 },
+    NYJ: { QB: 31, RB: 31, WR: 29, TE: 22, K: 25, DST: 1 },
+    PHI: { QB: 1, RB: 5, WR: 1, TE: 1, K: 20, DST: 31 },
+    PIT: { QB: 27, RB: 23, WR: 31, TE: 2, K: 28, DST: 10 },
+    SEA: { QB: 11, RB: 4, WR: 12, TE: 18, K: 10, DST: 19 },
+    SF: { QB: 23, RB: 18, WR: 20, TE: 32, K: 13, DST: 18 },
+    TB: { QB: 20, RB: 17, WR: 10, TE: 26, K: 3, DST: 21 },
+    TEN: { QB: 2, RB: 8, WR: 3, TE: 6, K: 7, DST: 16 },
+    WAS: { QB: 15, RB: 2, WR: 14, TE: 23, K: 18, DST: 24 },
+  },
+  a: {
+    ARI: { QB: 3, RB: 4, WR: 3, TE: 7, K: 4, DST: 27 },
+    ATL: { QB: 13, RB: 18, WR: 18, TE: 8, K: 16, DST: 23 },
+    BAL: { QB: 26, RB: 17, WR: 22, TE: 25, K: 20, DST: 10 },
+    BUF: { QB: 30, RB: 32, WR: 26, TE: 29, K: 27, DST: 1 },
+    CAR: { QB: 20, RB: 31, WR: 21, TE: 32, K: 15, DST: 30 },
+    CHI: { QB: 29, RB: 30, WR: 30, TE: 24, K: 23, DST: 26 },
+    CIN: { QB: 9, RB: 27, WR: 6, TE: 4, K: 26, DST: 22 },
+    CLE: { QB: 6, RB: 13, WR: 12, TE: 1, K: 18, DST: 5 },
+    DAL: { QB: 2, RB: 1, WR: 2, TE: 2, K: 1, DST: 25 },
+    DEN: { QB: 21, RB: 28, WR: 23, TE: 11, K: 28, DST: 7 },
+    DET: { QB: 22, RB: 7, WR: 28, TE: 18, K: 14, DST: 16 },
+    GB: { QB: 18, RB: 24, WR: 15, TE: 27, K: 7, DST: 13 },
+    HOU: { QB: 7, RB: 12, WR: 5, TE: 13, K: 2, DST: 11 },
+    IND: { QB: 11, RB: 22, WR: 9, TE: 20, K: 24, DST: 12 },
+    JAX: { QB: 17, RB: 21, WR: 16, TE: 16, K: 19, DST: 18 },
+    KC: { QB: 28, RB: 23, WR: 24, TE: 19, K: 5, DST: 21 },
+    LAC: { QB: 25, RB: 25, WR: 27, TE: 26, K: 25, DST: 14 },
+    LAR: { QB: 27, RB: 6, WR: 25, TE: 31, K: 6, DST: 19 },
+    LV: { QB: 32, RB: 29, WR: 31, TE: 22, K: 29, DST: 6 },
+    MIA: { QB: 24, RB: 14, WR: 29, TE: 10, K: 3, DST: 2 },
+    MIN: { QB: 15, RB: 16, WR: 7, TE: 21, K: 22, DST: 32 },
+    NE: { QB: 14, RB: 20, WR: 14, TE: 28, K: 32, DST: 24 },
+    NO: { QB: 16, RB: 9, WR: 10, TE: 23, K: 10, DST: 8 },
+    NYG: { QB: 8, RB: 8, WR: 4, TE: 9, K: 17, DST: 29 },
+    NYJ: { QB: 23, RB: 26, WR: 20, TE: 30, K: 31, DST: 3 },
+    PHI: { QB: 1, RB: 3, WR: 1, TE: 3, K: 9, DST: 31 },
+    PIT: { QB: 31, RB: 19, WR: 32, TE: 5, K: 30, DST: 4 },
+    SEA: { QB: 10, RB: 10, WR: 13, TE: 12, K: 12, DST: 9 },
+    SF: { QB: 12, RB: 11, WR: 17, TE: 17, K: 11, DST: 15 },
+    TB: { QB: 19, RB: 15, WR: 19, TE: 15, K: 13, DST: 20 },
+    TEN: { QB: 4, RB: 5, WR: 11, TE: 6, K: 21, DST: 17 },
+    WAS: { QB: 5, RB: 2, WR: 8, TE: 14, K: 8, DST: 28 },
+  },
+  b: {
+    ARI: { QB: 13, RB: 27, WR: 15, TE: 26, K: 29, DST: 32 },
+    ATL: { QB: 20, RB: 18, WR: 18, TE: 10, K: 14, DST: 15 },
+    BAL: { QB: 19, RB: 16, WR: 20, TE: 18, K: 19, DST: 11 },
+    BUF: { QB: 31, RB: 32, WR: 28, TE: 27, K: 27, DST: 1 },
+    CAR: { QB: 28, RB: 30, WR: 21, TE: 32, K: 11, DST: 27 },
+    CHI: { QB: 29, RB: 26, WR: 30, TE: 15, K: 24, DST: 25 },
+    CIN: { QB: 8, RB: 28, WR: 5, TE: 8, K: 23, DST: 19 },
+    CLE: { QB: 4, RB: 14, WR: 7, TE: 2, K: 13, DST: 9 },
+    DAL: { QB: 10, RB: 4, WR: 11, TE: 22, K: 15, DST: 29 },
+    DEN: { QB: 15, RB: 17, WR: 24, TE: 4, K: 21, DST: 4 },
+    DET: { QB: 18, RB: 7, WR: 23, TE: 14, K: 7, DST: 16 },
+    GB: { QB: 22, RB: 20, WR: 17, TE: 31, K: 9, DST: 18 },
+    HOU: { QB: 3, RB: 9, WR: 2, TE: 9, K: 1, DST: 14 },
+    IND: { QB: 9, RB: 19, WR: 16, TE: 25, K: 26, DST: 20 },
+    JAX: { QB: 12, RB: 24, WR: 9, TE: 12, K: 17, DST: 22 },
+    KC: { QB: 23, RB: 12, WR: 29, TE: 6, K: 4, DST: 12 },
+    LAC: { QB: 25, RB: 22, WR: 26, TE: 28, K: 22, DST: 7 },
+    LAR: { QB: 26, RB: 3, WR: 27, TE: 29, K: 8, DST: 17 },
+    LV: { QB: 32, RB: 31, WR: 32, TE: 23, K: 31, DST: 3 },
+    MIA: { QB: 16, RB: 15, WR: 25, TE: 11, K: 3, DST: 2 },
+    MIN: { QB: 17, RB: 21, WR: 8, TE: 20, K: 25, DST: 30 },
+    NE: { QB: 24, RB: 23, WR: 19, TE: 30, K: 28, DST: 13 },
+    NO: { QB: 21, RB: 8, WR: 12, TE: 21, K: 6, DST: 10 },
+    NYG: { QB: 6, RB: 10, WR: 3, TE: 7, K: 20, DST: 28 },
+    NYJ: { QB: 27, RB: 29, WR: 22, TE: 24, K: 30, DST: 5 },
+    PHI: { QB: 1, RB: 2, WR: 1, TE: 1, K: 2, DST: 31 },
+    PIT: { QB: 30, RB: 25, WR: 31, TE: 3, K: 32, DST: 6 },
+    SEA: { QB: 5, RB: 6, WR: 6, TE: 13, K: 10, DST: 8 },
+    SF: { QB: 11, RB: 11, WR: 10, TE: 16, K: 12, DST: 23 },
+    TB: { QB: 14, RB: 13, WR: 14, TE: 19, K: 5, DST: 21 },
+    TEN: { QB: 2, RB: 5, WR: 4, TE: 5, K: 18, DST: 24 },
+    WAS: { QB: 7, RB: 1, WR: 13, TE: 17, K: 16, DST: 26 },
+  },
+  c: {
+    ARI: { QB: 10, RB: 22, WR: 13, TE: 23, K: 20, DST: 29 },
+    ATL: { QB: 14, RB: 13, WR: 17, TE: 4, K: 15, DST: 18 },
+    BAL: { QB: 15, RB: 21, WR: 19, TE: 13, K: 19, DST: 16 },
+    BUF: { QB: 31, RB: 31, WR: 21, TE: 30, K: 31, DST: 2 },
+    CAR: { QB: 23, RB: 25, WR: 27, TE: 22, K: 9, DST: 25 },
+    CHI: { QB: 29, RB: 23, WR: 30, TE: 28, K: 30, DST: 26 },
+    CIN: { QB: 8, RB: 28, WR: 10, TE: 8, K: 24, DST: 22 },
+    CLE: { QB: 4, RB: 8, WR: 6, TE: 3, K: 13, DST: 9 },
+    DAL: { QB: 11, RB: 5, WR: 7, TE: 19, K: 17, DST: 30 },
+    DEN: { QB: 17, RB: 17, WR: 22, TE: 10, K: 18, DST: 1 },
+    DET: { QB: 28, RB: 9, WR: 28, TE: 17, K: 2, DST: 8 },
+    GB: { QB: 18, RB: 15, WR: 20, TE: 29, K: 11, DST: 13 },
+    HOU: { QB: 2, RB: 11, WR: 2, TE: 6, K: 4, DST: 17 },
+    IND: { QB: 6, RB: 19, WR: 8, TE: 26, K: 22, DST: 20 },
+    JAX: { QB: 20, RB: 30, WR: 14, TE: 12, K: 29, DST: 23 },
+    KC: { QB: 27, RB: 20, WR: 29, TE: 7, K: 12, DST: 10 },
+    LAC: { QB: 24, RB: 18, WR: 24, TE: 27, K: 26, DST: 4 },
+    LAR: { QB: 13, RB: 2, WR: 18, TE: 31, K: 3, DST: 21 },
+    LV: { QB: 32, RB: 32, WR: 32, TE: 25, K: 28, DST: 6 },
+    MIA: { QB: 21, RB: 12, WR: 25, TE: 11, K: 6, DST: 5 },
+    MIN: { QB: 16, RB: 27, WR: 4, TE: 15, K: 25, DST: 31 },
+    NE: { QB: 26, RB: 29, WR: 26, TE: 32, K: 27, DST: 12 },
+    NO: { QB: 12, RB: 7, WR: 11, TE: 14, K: 8, DST: 11 },
+    NYG: { QB: 9, RB: 10, WR: 5, TE: 9, K: 23, DST: 27 },
+    NYJ: { QB: 25, RB: 26, WR: 23, TE: 18, K: 21, DST: 3 },
+    PHI: { QB: 1, RB: 3, WR: 1, TE: 1, K: 5, DST: 32 },
+    PIT: { QB: 30, RB: 24, WR: 31, TE: 5, K: 32, DST: 7 },
+    SEA: { QB: 7, RB: 4, WR: 12, TE: 21, K: 7, DST: 14 },
+    SF: { QB: 19, RB: 16, WR: 15, TE: 20, K: 14, DST: 15 },
+    TB: { QB: 22, RB: 14, WR: 16, TE: 16, K: 1, DST: 19 },
+    TEN: { QB: 3, RB: 6, WR: 3, TE: 2, K: 10, DST: 24 },
+    WAS: { QB: 5, RB: 1, WR: 9, TE: 24, K: 16, DST: 28 },
+  },
+  d: {
+    ARI: { QB: 16, RB: 25, WR: 15, TE: 24, K: 18, DST: 29 },
+    ATL: { QB: 10, RB: 13, WR: 16, TE: 2, K: 16, DST: 17 },
+    BAL: { QB: 24, RB: 21, WR: 20, TE: 12, K: 22, DST: 8 },
+    BUF: { QB: 31, RB: 32, WR: 24, TE: 29, K: 31, DST: 5 },
+    CAR: { QB: 18, RB: 28, WR: 21, TE: 16, K: 10, DST: 26 },
+    CHI: { QB: 29, RB: 27, WR: 30, TE: 27, K: 30, DST: 28 },
+    CIN: { QB: 7, RB: 29, WR: 7, TE: 4, K: 17, DST: 22 },
+    CLE: { QB: 2, RB: 8, WR: 6, TE: 6, K: 6, DST: 11 },
+    DAL: { QB: 11, RB: 9, WR: 8, TE: 17, K: 27, DST: 31 },
+    DEN: { QB: 21, RB: 12, WR: 22, TE: 18, K: 21, DST: 1 },
+    DET: { QB: 25, RB: 4, WR: 27, TE: 23, K: 2, DST: 7 },
+    GB: { QB: 14, RB: 17, WR: 12, TE: 30, K: 14, DST: 19 },
+    HOU: { QB: 4, RB: 11, WR: 3, TE: 10, K: 5, DST: 21 },
+    IND: { QB: 5, RB: 10, WR: 14, TE: 11, K: 24, DST: 14 },
+    JAX: { QB: 8, RB: 26, WR: 9, TE: 13, K: 23, DST: 24 },
+    KC: { QB: 27, RB: 18, WR: 29, TE: 5, K: 13, DST: 9 },
+    LAC: { QB: 19, RB: 15, WR: 23, TE: 20, K: 28, DST: 3 },
+    LAR: { QB: 17, RB: 2, WR: 19, TE: 32, K: 7, DST: 23 },
+    LV: { QB: 32, RB: 31, WR: 32, TE: 22, K: 25, DST: 6 },
+    MIA: { QB: 26, RB: 19, WR: 28, TE: 15, K: 4, DST: 2 },
+    MIN: { QB: 12, RB: 23, WR: 4, TE: 14, K: 26, DST: 32 },
+    NE: { QB: 22, RB: 20, WR: 25, TE: 31, K: 19, DST: 12 },
+    NO: { QB: 13, RB: 3, WR: 11, TE: 9, K: 3, DST: 13 },
+    NYG: { QB: 9, RB: 14, WR: 5, TE: 7, K: 20, DST: 27 },
+    NYJ: { QB: 28, RB: 30, WR: 26, TE: 19, K: 29, DST: 4 },
+    PHI: { QB: 1, RB: 6, WR: 1, TE: 1, K: 15, DST: 30 },
+    PIT: { QB: 30, RB: 24, WR: 31, TE: 3, K: 32, DST: 10 },
+    SEA: { QB: 6, RB: 5, WR: 10, TE: 21, K: 12, DST: 18 },
+    SF: { QB: 20, RB: 22, WR: 18, TE: 25, K: 11, DST: 16 },
+    TB: { QB: 23, RB: 16, WR: 13, TE: 26, K: 1, DST: 20 },
+    TEN: { QB: 3, RB: 7, WR: 2, TE: 8, K: 8, DST: 15 },
+    WAS: { QB: 15, RB: 1, WR: 17, TE: 28, K: 9, DST: 25 },
+  },
+  f: {
+    ARI: { QB: 32, RB: 31, WR: 32, TE: 31, K: 31, DST: 30 },
+    ATL: { QB: 7, RB: 10, WR: 15, TE: 6, K: 16, DST: 10 },
+    BAL: { QB: 9, RB: 19, WR: 13, TE: 4, K: 22, DST: 13 },
+    BUF: { QB: 18, RB: 27, WR: 11, TE: 16, K: 17, DST: 31 },
+    CAR: { QB: 8, RB: 12, WR: 21, TE: 1, K: 10, DST: 6 },
+    CHI: { QB: 20, RB: 6, WR: 22, TE: 21, K: 25, DST: 25 },
+    CIN: { QB: 23, RB: 20, WR: 18, TE: 15, K: 6, DST: 19 },
+    CLE: { QB: 3, RB: 7, WR: 2, TE: 29, K: 4, DST: 20 },
+    DAL: { QB: 31, RB: 32, WR: 31, TE: 32, K: 32, DST: 32 },
+    DEN: { QB: 15, RB: 1, WR: 17, TE: 26, K: 7, DST: 3 },
+    DET: { QB: 22, RB: 13, WR: 16, TE: 23, K: 3, DST: 4 },
+    GB: { QB: 6, RB: 5, WR: 12, TE: 22, K: 28, DST: 21 },
+    HOU: { QB: 12, RB: 14, WR: 14, TE: 17, K: 27, DST: 29 },
+    IND: { QB: 4, RB: 2, WR: 26, TE: 7, K: 12, DST: 11 },
+    JAX: { QB: 1, RB: 18, WR: 3, TE: 14, K: 24, DST: 27 },
+    KC: { QB: 17, RB: 9, WR: 27, TE: 2, K: 30, DST: 5 },
+    LAC: { QB: 10, RB: 4, WR: 8, TE: 9, K: 20, DST: 1 },
+    LAR: { QB: 2, RB: 11, WR: 5, TE: 10, K: 18, DST: 26 },
+    LV: { QB: 24, RB: 30, WR: 24, TE: 19, K: 8, DST: 12 },
+    MIA: { QB: 21, RB: 22, WR: 10, TE: 24, K: 21, DST: 24 },
+    MIN: { QB: 13, RB: 23, WR: 4, TE: 8, K: 23, DST: 17 },
+    NE: { QB: 26, RB: 15, WR: 30, TE: 20, K: 1, DST: 2 },
+    NO: { QB: 5, RB: 3, WR: 19, TE: 3, K: 9, DST: 18 },
+    NYG: { QB: 27, RB: 25, WR: 23, TE: 12, K: 26, DST: 14 },
+    NYJ: { QB: 25, RB: 24, WR: 28, TE: 5, K: 11, DST: 15 },
+    PHI: { QB: 29, RB: 28, WR: 20, TE: 11, K: 29, DST: 23 },
+    PIT: { QB: 14, RB: 17, WR: 7, TE: 13, K: 13, DST: 22 },
+    SEA: { QB: 16, RB: 8, WR: 9, TE: 28, K: 15, DST: 28 },
+    SF: { QB: 28, RB: 29, WR: 25, TE: 25, K: 14, DST: 9 },
+    TB: { QB: 19, RB: 16, WR: 6, TE: 27, K: 2, DST: 16 },
+    TEN: { QB: 11, RB: 21, WR: 1, TE: 18, K: 5, DST: 8 },
+    WAS: { QB: 30, RB: 26, WR: 29, TE: 30, K: 19, DST: 7 },
+  },
+  g: {
+    ARI: { QB: 15, RB: 5, WR: 25, TE: 11, K: 1, DST: 7 },
+    ATL: { QB: 1, RB: 7, WR: 5, TE: 4, K: 20, DST: 22 },
+    BAL: { QB: 21, RB: 23, WR: 14, TE: 9, K: 22, DST: 12 },
+    BUF: { QB: 12, RB: 31, WR: 11, TE: 17, K: 23, DST: 32 },
+    CAR: { QB: 5, RB: 6, WR: 21, TE: 1, K: 17, DST: 11 },
+    CHI: { QB: 27, RB: 12, WR: 23, TE: 31, K: 24, DST: 30 },
+    CIN: { QB: 20, RB: 19, WR: 9, TE: 10, K: 3, DST: 25 },
+    CLE: { QB: 8, RB: 4, WR: 3, TE: 25, K: 5, DST: 16 },
+    DAL: { QB: 13, RB: 28, WR: 4, TE: 12, K: 31, DST: 27 },
+    DEN: { QB: 23, RB: 8, WR: 18, TE: 32, K: 19, DST: 4 },
+    DET: { QB: 28, RB: 13, WR: 29, TE: 26, K: 7, DST: 1 },
+    GB: { QB: 3, RB: 11, WR: 6, TE: 8, K: 28, DST: 19 },
+    HOU: { QB: 18, RB: 22, WR: 26, TE: 24, K: 29, DST: 29 },
+    IND: { QB: 6, RB: 1, WR: 20, TE: 2, K: 12, DST: 3 },
+    JAX: { QB: 9, RB: 16, WR: 8, TE: 22, K: 26, DST: 23 },
+    KC: { QB: 25, RB: 24, WR: 22, TE: 13, K: 30, DST: 13 },
+    LAC: { QB: 10, RB: 3, WR: 16, TE: 5, K: 27, DST: 10 },
+    LAR: { QB: 2, RB: 14, WR: 7, TE: 18, K: 16, DST: 28 },
+    LV: { QB: 16, RB: 30, WR: 13, TE: 14, K: 9, DST: 24 },
+    MIA: { QB: 29, RB: 27, WR: 27, TE: 23, K: 18, DST: 15 },
+    MIN: { QB: 7, RB: 18, WR: 1, TE: 7, K: 13, DST: 26 },
+    NE: { QB: 11, RB: 10, WR: 28, TE: 15, K: 4, DST: 8 },
+    NO: { QB: 4, RB: 2, WR: 15, TE: 3, K: 11, DST: 17 },
+    NYG: { QB: 24, RB: 26, WR: 12, TE: 16, K: 21, DST: 14 },
+    NYJ: { QB: 19, RB: 15, WR: 24, TE: 6, K: 15, DST: 9 },
+    PHI: { QB: 32, RB: 29, WR: 32, TE: 19, K: 32, DST: 21 },
+    PIT: { QB: 17, RB: 9, WR: 10, TE: 21, K: 8, DST: 20 },
+    SEA: { QB: 22, RB: 17, WR: 17, TE: 29, K: 25, DST: 31 },
+    SF: { QB: 30, RB: 32, WR: 31, TE: 28, K: 14, DST: 5 },
+    TB: { QB: 26, RB: 21, WR: 19, TE: 27, K: 10, DST: 18 },
+    TEN: { QB: 14, RB: 20, WR: 2, TE: 20, K: 2, DST: 2 },
+    WAS: { QB: 31, RB: 25, WR: 30, TE: 30, K: 6, DST: 6 },
+  },
+  h: {
+    ARI: { QB: 17, RB: 3, WR: 18, TE: 22, K: 4, DST: 1 },
+    ATL: { QB: 6, RB: 11, WR: 13, TE: 6, K: 13, DST: 14 },
+    BAL: { QB: 16, RB: 5, WR: 26, TE: 2, K: 20, DST: 5 },
+    BUF: { QB: 9, RB: 26, WR: 15, TE: 7, K: 24, DST: 28 },
+    CAR: { QB: 10, RB: 12, WR: 25, TE: 1, K: 26, DST: 12 },
+    CHI: { QB: 22, RB: 19, WR: 11, TE: 29, K: 19, DST: 31 },
+    CIN: { QB: 19, RB: 14, WR: 6, TE: 15, K: 2, DST: 25 },
+    CLE: { QB: 7, RB: 8, WR: 1, TE: 23, K: 1, DST: 19 },
+    DAL: { QB: 12, RB: 21, WR: 7, TE: 17, K: 28, DST: 26 },
+    DEN: { QB: 26, RB: 20, WR: 20, TE: 30, K: 27, DST: 4 },
+    DET: { QB: 21, RB: 15, WR: 14, TE: 28, K: 12, DST: 9 },
+    GB: { QB: 14, RB: 17, WR: 16, TE: 14, K: 31, DST: 17 },
+    HOU: { QB: 23, RB: 24, WR: 21, TE: 24, K: 30, DST: 32 },
+    IND: { QB: 15, RB: 1, WR: 24, TE: 3, K: 15, DST: 2 },
+    JAX: { QB: 3, RB: 6, WR: 5, TE: 18, K: 22, DST: 27 },
+    KC: { QB: 29, RB: 31, WR: 27, TE: 20, K: 29, DST: 6 },
+    LAC: { QB: 18, RB: 10, WR: 22, TE: 9, K: 25, DST: 8 },
+    LAR: { QB: 1, RB: 13, WR: 9, TE: 10, K: 18, DST: 29 },
+    LV: { QB: 13, RB: 18, WR: 17, TE: 5, K: 3, DST: 21 },
+    MIA: { QB: 31, RB: 23, WR: 28, TE: 31, K: 21, DST: 22 },
+    MIN: { QB: 2, RB: 2, WR: 4, TE: 4, K: 8, DST: 18 },
+    NE: { QB: 20, RB: 25, WR: 30, TE: 13, K: 6, DST: 15 },
+    NO: { QB: 4, RB: 4, WR: 12, TE: 8, K: 9, DST: 23 },
+    NYG: { QB: 5, RB: 16, WR: 3, TE: 21, K: 11, DST: 13 },
+    NYJ: { QB: 32, RB: 22, WR: 31, TE: 11, K: 10, DST: 3 },
+    PHI: { QB: 28, RB: 28, WR: 29, TE: 16, K: 32, DST: 20 },
+    PIT: { QB: 11, RB: 7, WR: 8, TE: 19, K: 5, DST: 16 },
+    SEA: { QB: 25, RB: 9, WR: 19, TE: 26, K: 23, DST: 30 },
+    SF: { QB: 30, RB: 30, WR: 32, TE: 32, K: 16, DST: 11 },
+    TB: { QB: 24, RB: 27, WR: 10, TE: 27, K: 14, DST: 24 },
+    TEN: { QB: 8, RB: 29, WR: 2, TE: 12, K: 7, DST: 7 },
+    WAS: { QB: 27, RB: 32, WR: 23, TE: 25, K: 17, DST: 10 },
+  },
+  m: {
+    ARI: { QB: 13, RB: 3, WR: 17, TE: 22, K: 2, DST: 1 },
+    ATL: { QB: 17, RB: 10, WR: 21, TE: 5, K: 13, DST: 10 },
+    BAL: { QB: 4, RB: 6, WR: 25, TE: 1, K: 23, DST: 6 },
+    BUF: { QB: 11, RB: 25, WR: 14, TE: 9, K: 24, DST: 31 },
+    CAR: { QB: 16, RB: 18, WR: 26, TE: 2, K: 18, DST: 13 },
+    CHI: { QB: 18, RB: 11, WR: 12, TE: 23, K: 22, DST: 29 },
+    CIN: { QB: 21, RB: 22, WR: 11, TE: 21, K: 3, DST: 19 },
+    CLE: { QB: 6, RB: 9, WR: 2, TE: 26, K: 1, DST: 22 },
+    DAL: { QB: 8, RB: 23, WR: 4, TE: 16, K: 31, DST: 25 },
+    DEN: { QB: 23, RB: 5, WR: 23, TE: 27, K: 15, DST: 4 },
+    DET: { QB: 12, RB: 15, WR: 9, TE: 24, K: 9, DST: 9 },
+    GB: { QB: 22, RB: 12, WR: 22, TE: 25, K: 32, DST: 21 },
+    HOU: { QB: 15, RB: 16, WR: 13, TE: 20, K: 27, DST: 32 },
+    IND: { QB: 19, RB: 1, WR: 29, TE: 8, K: 14, DST: 5 },
+    JAX: { QB: 2, RB: 14, WR: 3, TE: 11, K: 21, DST: 28 },
+    KC: { QB: 26, RB: 17, WR: 30, TE: 3, K: 28, DST: 2 },
+    LAC: { QB: 14, RB: 8, WR: 19, TE: 18, K: 19, DST: 3 },
+    LAR: { QB: 1, RB: 7, WR: 7, TE: 6, K: 25, DST: 26 },
+    LV: { QB: 25, RB: 26, WR: 24, TE: 10, K: 5, DST: 12 },
+    MIA: { QB: 27, RB: 24, WR: 18, TE: 31, K: 26, DST: 27 },
+    MIN: { QB: 3, RB: 13, WR: 8, TE: 4, K: 12, DST: 15 },
+    NE: { QB: 29, RB: 27, WR: 32, TE: 19, K: 4, DST: 7 },
+    NO: { QB: 9, RB: 2, WR: 16, TE: 7, K: 8, DST: 24 },
+    NYG: { QB: 10, RB: 20, WR: 10, TE: 17, K: 16, DST: 18 },
+    NYJ: { QB: 32, RB: 31, WR: 31, TE: 12, K: 10, DST: 8 },
+    PHI: { QB: 28, RB: 28, WR: 20, TE: 13, K: 30, DST: 20 },
+    PIT: { QB: 7, RB: 19, WR: 6, TE: 15, K: 11, DST: 17 },
+    SEA: { QB: 24, RB: 4, WR: 15, TE: 30, K: 17, DST: 30 },
+    SF: { QB: 30, RB: 29, WR: 27, TE: 32, K: 20, DST: 16 },
+    TB: { QB: 20, RB: 21, WR: 5, TE: 29, K: 7, DST: 23 },
+    TEN: { QB: 5, RB: 30, WR: 1, TE: 14, K: 6, DST: 14 },
+    WAS: { QB: 31, RB: 32, WR: 28, TE: 28, K: 29, DST: 11 },
+  },
+  n: {
+    ARI: { QB: 17, RB: 2, WR: 17, TE: 18, K: 5, DST: 2 },
+    ATL: { QB: 13, RB: 6, WR: 20, TE: 9, K: 13, DST: 21 },
+    BAL: { QB: 9, RB: 12, WR: 19, TE: 1, K: 20, DST: 6 },
+    BUF: { QB: 6, RB: 7, WR: 18, TE: 4, K: 14, DST: 23 },
+    CAR: { QB: 11, RB: 13, WR: 21, TE: 3, K: 22, DST: 20 },
+    CHI: { QB: 29, RB: 27, WR: 25, TE: 30, K: 18, DST: 22 },
+    CIN: { QB: 23, RB: 14, WR: 10, TE: 16, K: 4, DST: 11 },
+    CLE: { QB: 5, RB: 1, WR: 6, TE: 5, K: 2, DST: 8 },
+    DAL: { QB: 7, RB: 11, WR: 4, TE: 13, K: 26, DST: 27 },
+    DEN: { QB: 30, RB: 29, WR: 27, TE: 32, K: 25, DST: 3 },
+    DET: { QB: 22, RB: 17, WR: 14, TE: 26, K: 16, DST: 17 },
+    GB: { QB: 12, RB: 24, WR: 7, TE: 15, K: 31, DST: 24 },
+    HOU: { QB: 18, RB: 22, WR: 12, TE: 21, K: 23, DST: 31 },
+    IND: { QB: 15, RB: 9, WR: 24, TE: 2, K: 24, DST: 4 },
+    JAX: { QB: 4, RB: 10, WR: 2, TE: 14, K: 12, DST: 29 },
+    KC: { QB: 28, RB: 30, WR: 22, TE: 23, K: 28, DST: 1 },
+    LAC: { QB: 21, RB: 26, WR: 28, TE: 12, K: 21, DST: 14 },
+    LAR: { QB: 3, RB: 21, WR: 16, TE: 10, K: 29, DST: 30 },
+    LV: { QB: 19, RB: 25, WR: 23, TE: 11, K: 3, DST: 15 },
+    MIA: { QB: 32, RB: 31, WR: 29, TE: 31, K: 30, DST: 13 },
+    MIN: { QB: 1, RB: 3, WR: 1, TE: 6, K: 8, DST: 28 },
+    NE: { QB: 16, RB: 20, WR: 30, TE: 8, K: 6, DST: 10 },
+    NO: { QB: 2, RB: 4, WR: 11, TE: 7, K: 11, DST: 25 },
+    NYG: { QB: 10, RB: 8, WR: 8, TE: 29, K: 17, DST: 26 },
+    NYJ: { QB: 31, RB: 18, WR: 32, TE: 22, K: 15, DST: 5 },
+    PHI: { QB: 25, RB: 19, WR: 26, TE: 19, K: 32, DST: 16 },
+    PIT: { QB: 8, RB: 5, WR: 3, TE: 20, K: 1, DST: 18 },
+    SEA: { QB: 24, RB: 15, WR: 13, TE: 24, K: 27, DST: 32 },
+    SF: { QB: 27, RB: 16, WR: 31, TE: 28, K: 7, DST: 9 },
+    TB: { QB: 26, RB: 28, WR: 15, TE: 27, K: 9, DST: 19 },
+    TEN: { QB: 20, RB: 32, WR: 5, TE: 17, K: 19, DST: 7 },
+    WAS: { QB: 14, RB: 23, WR: 9, TE: 25, K: 10, DST: 12 },
+  },
+};
+const SOS_WINDOWS = { e: "wk 1-18", a: "wk 1-13", b: "wk 1-14", c: "wk 1-15", d: "wk 1-16", f: "wk 14-16", g: "wk 15-16", h: "wk 15-17", m: "wk 14-17", n: "wk 15-18" };
+const REG_WINDOWS = [["a", "1-13"], ["b", "1-14"], ["c", "1-15"], ["d", "1-16"]];
+// playoff windows fftoolbox publishes for each regular-season split (none start after wk 15)
+const PO_WINDOWS = { a: [["f", "14-16"], ["m", "14-17"]], b: [["g", "15-16"], ["h", "15-17"], ["n", "15-18"]], c: [], d: [] };
+const SOS_MODES = [["full", "FULL SEASON"], ["reg", "REG SEASON"], ["po", "PLAYOFFS"], ["blend", "70/30 BLEND"]];
+const BLEND_REG_W = 0.7; // blend = 70% regular-season rank + 30% playoff rank
+const SOS_CFG_KEY = "dl_sos_cfg_v1";
+const SOS_CFG_DEFAULT = { mode: "full", reg: "b", po: "h" };
+function loadSosCfg() {
+  let c = { ...SOS_CFG_DEFAULT };
+  try { c = { ...c, ...JSON.parse(localStorage.getItem(SOS_CFG_KEY) || "{}") }; } catch (e) {}
+  if (!REG_WINDOWS.some(([k]) => k === c.reg)) c.reg = SOS_CFG_DEFAULT.reg;
+  const pos = PO_WINDOWS[c.reg] || [];
+  if (!pos.some(([k]) => k === c.po)) c.po = pos.length ? pos[0][0] : null;
+  if (!SOS_MODES.some(([k]) => k === c.mode)) c.mode = "full";
+  if ((c.mode === "po" || c.mode === "blend") && !c.po) c.mode = "reg";
+  return c;
+}
+
+/* --------------------------- league settings --------------------------- */
+const LG_CFG_KEY = "dl_league_cfg_v1";
+const LG_DEFAULT = { scoring: "PPR", teams: 10, qb: 1, rb: 2, wr: 2, te: 1, flex: 1, sf: 0, k: 1, dst: 1, bench: 6 };
+const SCORINGS = [["PPR", "PPR"], ["HALF", "HALF"], ["STD", "STD"]];
+const scLabelOf = (s) => (s === "PPR" ? "PPR" : s === "HALF" ? "half-PPR" : "standard");
+function loadLgCfg() {
+  let c = { ...LG_DEFAULT };
+  try { c = { ...c, ...JSON.parse(localStorage.getItem(LG_CFG_KEY) || "{}") }; } catch (e) {}
+  if (!SCORINGS.some(([k]) => k === c.scoring)) c.scoring = "PPR";
+  c.teams = Math.min(14, Math.max(8, c.teams | 0));
+  ["qb", "rb", "wr", "te", "flex", "sf", "k", "dst", "bench"].forEach((k) => { c[k] = Math.max(0, c[k] | 0); });
+  return c;
+}
+const lgStarters = (lg) => lg.qb + lg.rb + lg.wr + lg.te + lg.flex + lg.sf + lg.k + lg.dst;
+// compact one-line summary for the collapsed settings button
+const lgSummary = (lg, sos) => {
+  const sosBit = { full: "full-yr SoS", reg: "reg-szn SoS", po: "playoff SoS", blend: "blended SoS" }[(sos || {}).mode] || "SoS";
+  return `${lg.scoring} · ${lg.teams}-team${lg.sf ? " · SF" : ""} · ${sosBit}`;
+};
+// league-wide starting slots consumed per position (flex/superflex shares are approximations)
+const lgStarterCounts = (lg) => ({
+  QB: lg.teams * (lg.qb + 0.85 * lg.sf),
+  RB: lg.teams * (lg.rb + 0.45 * lg.flex + 0.05 * lg.sf),
+  WR: lg.teams * (lg.wr + 0.45 * lg.flex + 0.05 * lg.sf),
+  TE: lg.teams * (lg.te + 0.1 * lg.flex),
+  K: lg.teams * lg.k,
+  DST: lg.teams * lg.dst,
+});
+
+/* --------------------------- draft-day math --------------------------- */
+const normCdf = (z) => {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp((-z * z) / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - p : p;
+};
+// chance a player is still on the board at overall pick `pickNum`, from live ADP
+function pSurvive(adp, pickNum) {
+  if (adp == null || adp >= 500) return null;
+  const sigma = 3 + 0.14 * adp;
+  const p = 1 - normCdf((pickNum - adp) / sigma);
+  return Math.max(1, Math.min(99, Math.round(p * 100)));
+}
+function snakeOwner(pickIdx, teams) {
+  const round = Math.floor(pickIdx / teams);
+  const slot = pickIdx % teams;
+  return round % 2 === 0 ? slot : teams - 1 - slot;
+}
+function nextPickOf(slot, fromIdx, teams) {
+  for (let i = fromIdx; i < fromIdx + teams * 2 + 2; i++) if (snakeOwner(i, teams) === slot) return i;
+  return fromIdx;
+}
+const pickLabelOf = (idx, teams) => `${Math.floor(idx / teams) + 1}.${(idx % teams) + 1 < 10 ? "0" : ""}${(idx % teams) + 1}`;
+
+// One synthesized recommendation: weighs cross-position value (PAR) against your roster needs,
+// positional scarcity before your next pick, and the odds a player survives back to you.
+function recommendPick(available, roster, lg, myNextIdx) {
+  if (!available || !available.length) return null;
+  const starterNeed = { QB: lg.qb + lg.sf, RB: lg.rb, WR: lg.wr, TE: lg.te, K: lg.k, DST: lg.dst };
+  const have = {};
+  roster.forEach((p) => { have[p.pos] = (have[p.pos] || 0) + 1; });
+  const flexOpen = Math.max(0, lg.flex - Math.max(0, (have.RB || 0) - lg.rb) - Math.max(0, (have.WR || 0) - lg.wr) - Math.max(0, (have.TE || 0) - lg.te));
+  const scored = available.slice(0, 40).map((p) => {
+    const par = p.par != null ? p.par : -25;
+    let score = par, needBoost = 0, needReason = null;
+    const need = (starterNeed[p.pos] || 0) - (have[p.pos] || 0);
+    const flexEligible = p.pos === "RB" || p.pos === "WR" || p.pos === "TE";
+    if (need > 0) { needBoost = 16 + need * 5; needReason = `you still need a starting ${p.pos}`; }
+    else if (flexEligible && flexOpen > 0) { needBoost = 9; needReason = `slots into your open FLEX`; }
+    else {
+      const over = (have[p.pos] || 0) - (starterNeed[p.pos] || 0);
+      if (over >= 2) needBoost = -12 - (over - 2) * 6; // already deep here
+    }
+    const comps = available.filter((x) => x.pos === p.pos && x.par != null && x.par >= 0.85 * par && x.id !== p.id).length;
+    let scarceBoost = 0, scarceReason = null;
+    if (par > 5 && comps <= 2) { scarceBoost = 15; scarceReason = `only ${comps} comparable ${p.pos}${comps === 1 ? "" : "s"} left`; }
+    else if (par > 5 && comps <= 5) scarceBoost = 6;
+    const surv = pSurvive(p.adp, myNextIdx + 1);
+    let survBoost = 0, survReason = null;
+    if (surv != null) {
+      if (surv <= 25) { survBoost = 13; survReason = `won't make it back to you (${surv}% to survive)`; }
+      else if (surv >= 82) { survBoost = -7; survReason = `likely still there next round`; }
+    }
+    const mkReasons = [needReason, scarceReason, survReason].filter(Boolean);
+    return { p, score: score + needBoost + scarceBoost + survBoost, reasons: mkReasons, surv };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored[0];
+  if (!top) return null;
+  if (!top.reasons.length) top.reasons.push(top.p.par > 0 ? `best value on the board (PAR +${top.p.par})` : "best player available");
+  return top;
+}
+
+// Parse a pasted draft-pick list (one pick per line, in order) and match names to the pool.
+// Tolerates leading pick numbers ("1.01", "12.", "R1P1", "Round 1, Pick 3:") and trailing
+// position/team tags ("Ja'Marr Chase, WR, CIN"). Returns matched ids in order + unmatched lines.
+function parsePickList(text, pool, alreadyTaken) {
+  const used = new Set(alreadyTaken || []);
+  const lines = (text || "").split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
+  const ids = [], unmatched = [];
+  lines.forEach((line) => {
+    let s = line
+      .replace(/^\s*round\s*\d+[,\s]*pick\s*\d+\s*[:\-.]?/i, "")
+      .replace(/^\s*r?\d+\s*[.)\-:]\s*\d*\s*[:\-.]?\s*/i, "")
+      .replace(/^\s*\d+[.):\-]\s*/, "")
+      .replace(/[,\-–(]\s*(QB|RB|WR|TE|K|D\/?ST|DEF|DST)\b.*$/i, "")
+      .replace(/\s+(QB|RB|WR|TE|K|DST)\b.*$/i, "")
+      .trim();
+    const key = norm(s);
+    if (!key || key.length < 2) { unmatched.push(line); return; }
+    let m = null, best = 0;
+    for (const p of pool) {
+      if (used.has(p.id)) continue;
+      const pk = norm(p.n);
+      let sc = 0;
+      if (pk === key) sc = 3;
+      else if (pk.startsWith(key) || key.startsWith(pk)) sc = 2;
+      else if (pk.includes(key) || key.includes(pk)) sc = 1;
+      if (sc > best) { best = sc; m = p; if (sc === 3) break; }
+    }
+    if (m) { ids.push(m.id); used.add(m.id); }
+    else unmatched.push(line);
+  });
+  return { ids, unmatched };
+}
+
+/* --------------------------- personal marks (targets / avoids / notes) --------------------------- */
+const MARKS_KEY = "dl_marks_v1";
+const markKeyOf = (p) => (p.n || "").toLowerCase().replace(/[^a-z]/g, "") + p.pos;
+function loadMarks() {
+  try { return JSON.parse(localStorage.getItem(MARKS_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+// live draft tracker state survives a page refresh — draft-day insurance
+const TRACK_KEY = "dl_tracker_v1";
+function loadTrack() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TRACK_KEY) || "null");
+    if (t && Array.isArray(t.picks)) return t;
+  } catch (e) {}
+  return { started: false, slot: 0, teams: 10, picks: [] };
+}
+
+/* --------------------------- my team (season mode) --------------------------- */
+const TEAM_KEY = "dl_myteam_v1";
+function loadMyTeam() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TEAM_KEY) || "null");
+    if (t && Array.isArray(t.ids)) return t;
+  } catch (e) {}
+  return { ids: [], savedAt: null };
+}
+const LINEUP_OUT = { OUT: 1, IR: 1, PUP: 1, SUS: 1, COV: 1 }; // can't play; D/Q start but get flagged
+const SLOT_ELIG = { QB: ["QB"], RB: ["RB"], WR: ["WR"], TE: ["TE"], FLEX: ["RB", "WR", "TE"], SFLX: ["QB", "RB", "WR", "TE"], K: ["K"], DST: ["DST"] };
+
+// Optimal-ish weekly lineup: dedicated slots first, then FLEX/superflex, by matchup-adjusted
+// points per game. Base ppg is season projection / 17 (2025 average as fallback); when the weekly
+// schedule is loaded, the opponent is shown and ppg is tilted ±8% by opponent strength (proxied
+// from the opponent DST's projection percentile — honest label, not a full DVOA). Byes come from
+// the real schedule when available (falling back to FantasyPros bye fields), and ruled-out
+// players are excluded up front.
+function buildLineup(roster, lg, week, sched, oppQOf) {
+  const avail = [], sidelined = [];
+  roster.forEach((p) => {
+    const base = Math.round(((p.proj > 0 ? p.proj / 17 : p.avg25 || 0)) * 10) / 10;
+    const tmSched = sched && sched[p.tm];
+    const game = tmSched ? tmSched[String(week)] || null : undefined; // undefined = schedule unknown
+    const onBye = tmSched ? !game : week != null && p.bye === week;
+    const isOut = !!LINEUP_OUT[p.inj];
+    let ppg = base, q = null;
+    if (game && oppQOf) {
+      q = oppQOf(game.opp); // 0..1, higher = tougher opposing defense
+      if (q != null) ppg = Math.round(base * (1 + (0.5 - q) * 0.16) * 10) / 10;
+    }
+    (onBye || isOut ? sidelined : avail).push({ p, ppg, base, game: game || null, q, onBye, isOut });
+  });
+  avail.sort((a, b) => b.ppg - a.ppg);
+  const slots = [], used = new Set();
+  [["QB", lg.qb], ["RB", lg.rb], ["WR", lg.wr], ["TE", lg.te], ["FLEX", lg.flex], ["SFLX", lg.sf], ["K", lg.k], ["DST", lg.dst]].forEach(([label, n]) => {
+    for (let i = 0; i < n; i++) {
+      const r = avail.find((x) => !used.has(x.p.id) && SLOT_ELIG[label].includes(x.p.pos)) || null;
+      slots.push({ label, r });
+      if (r) used.add(r.p.id);
+    }
+  });
+  const bench = avail.filter((x) => !used.has(x.p.id));
+  return { slots, bench, sidelined };
+}
+
+// Waiver wire: best available (not on the team) by PAR, boosted where the roster is thin or the
+// pickup beats the team's weakest starter at his position; trending adds surface too.
+function waiverTargets(graded, teamIds, lg, lineup) {
+  const teamSet = new Set(teamIds);
+  const starterNeed = { QB: lg.qb + lg.sf, RB: lg.rb, WR: lg.wr, TE: lg.te, K: lg.k, DST: lg.dst };
+  const have = {};
+  teamIds.forEach((id) => { const p = graded.find((x) => x.id === id); if (p) have[p.pos] = (have[p.pos] || 0) + 1; });
+  const worstStarterPpg = (pos) => {
+    const elig = lineup.slots.filter((s) => s.r && SLOT_ELIG[s.label].includes(pos));
+    return elig.length ? Math.min(...elig.map((s) => s.r.ppg)) : null;
+  };
+  return graded
+    .filter((p) => !teamSet.has(p.id) && p.par != null)
+    .slice(0, 400)
+    .map((p) => {
+      const ppg = Math.round(((p.proj > 0 ? p.proj / 17 : p.avg25 || 0)) * 10) / 10;
+      const reasons = [];
+      let score = p.par;
+      if ((have[p.pos] || 0) < (starterNeed[p.pos] || 0)) { score += 20; reasons.push(`you're thin at ${p.pos}`); }
+      const w = worstStarterPpg(p.pos);
+      if (w != null && ppg > w + 0.5) { score += 10; reasons.push(`beats your weakest ${p.pos} starter (${ppg} vs ${w} ppg)`); }
+      if (p.trending) { score += 8; reasons.push("🔥 trending add — news may be moving"); }
+      return { p, ppg, score, reasons };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+}
+const tblRank = (k, tm, pos) => (k && SOS_TABLES[k] && SOS_TABLES[k][tm] && SOS_TABLES[k][tm][pos]) || null;
+// effective rank + window label under the configured grading mode
+function sosView(tm, pos, cfg) {
+  const c = cfg || SOS_CFG_DEFAULT;
+  if (c.mode === "reg") return { rank: tblRank(c.reg, tm, pos), win: SOS_WINDOWS[c.reg] };
+  if (c.mode === "po") return { rank: tblRank(c.po, tm, pos), win: c.po ? SOS_WINDOWS[c.po] : null };
+  if (c.mode === "blend") {
+    const r = tblRank(c.reg, tm, pos), p = tblRank(c.po, tm, pos);
+    if (r != null && p != null) return { rank: Math.round(BLEND_REG_W * r + (1 - BLEND_REG_W) * p), win: "blend", regRank: r, poRank: p };
+    return { rank: r != null ? r : p, win: r != null ? SOS_WINDOWS[c.reg] : c.po ? SOS_WINDOWS[c.po] : null };
+  }
+  return { rank: tblRank("e", tm, pos), win: SOS_WINDOWS.e };
+}
+// rank 1 -> 95, rank 32 -> 55 on the shared factor scale
+const sosGrade = (rank) => (rank ? Math.round(95 - ((rank - 1) * 40) / 31) : null);
+const ordinal = (n) => { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+// rank 30 reads better as "3rd-toughest" than "30th-easiest"
+const sosLabel = (rank, pos) => (rank <= 16 ? `${ordinal(rank)}-easiest ${pos} slate` : `${ordinal(33 - rank)}-toughest ${pos} slate`);
+
+const norm = (s) => (s || "").toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b/g, "").replace(/[^a-z]/g, "");
+
+const INJ_TAG = {
+  QUESTIONABLE: "Q", DOUBTFUL: "D", OUT: "OUT", INJURY_RESERVE: "IR", SUSPENSION: "SUS",
+  Questionable: "Q", Doubtful: "D", Out: "OUT", IR: "IR", PUP: "PUP", Sus: "SUS", COV: "COV",
+  ACTIVE: "", NA: "", "": "",
+};
+const injTagOf = (raw) => (INJ_TAG[raw] !== undefined ? INJ_TAG[raw] : String(raw).slice(0, 3).toUpperCase());
+const SEVERE_INJ = { OUT: 1, IR: 1, PUP: 1, D: 1, SUS: 1, COV: 1 };
+// ESPN carries a stale "QUESTIONABLE" on ~100 healthy players in the offseason (injured:false).
+// Show/dock a soft "Q" only when it's backed by a real signal: ESPN's injured flag, or a
+// Sleeper-reported injury body part. Severe designations are always trusted from either source.
+function resolveInjury(espnStatus, espnInjured, slpStatus, slpPart) {
+  const eTag = injTagOf(espnStatus), sTag = injTagOf(slpStatus);
+  if (SEVERE_INJ[eTag]) return eTag;
+  if (SEVERE_INJ[sTag]) return sTag;
+  if (eTag === "Q" && espnInjured) return "Q";
+  if (sTag === "Q" && slpPart) return "Q";
+  return "";
+}
+
+function buildLive({ espn, sleeper, fp, trending }, sosCfg, lgCfg) {
+  const lg = lgCfg || LG_DEFAULT;
+  const recAdj = lg.scoring === "HALF" ? 0.5 : lg.scoring === "STD" ? 1 : 0; // PPR-point haircut per reception
+  const slpByEspn = new Map(), slpByKey = new Map(), slpUsed = new Set();
+  sleeper.forEach((s) => {
+    if (s.espn != null) slpByEspn.set(String(s.espn), s);
+    slpByKey.set(norm(s.name) + s.pos, s);
+  });
+  const fpByKey = new Map(), fpByTeamPos = new Map();
+  fp.forEach((f) => {
+    fpByKey.set(norm(f.name) + f.pos, f);
+    if (f.pos === "DST" || f.pos === "K") fpByTeamPos.set(f.team + f.pos, f); // DST names never match across providers
+  });
+  const curByKey = new Map();
+  CURATED.forEach((c) => curByKey.set(norm(c.n) + c.pos, c));
+  const trendSet = new Set(trending);
+
+  // unified raw records: ESPN pool first (has ADP/projections), then Sleeper-only deep roster
+  const raw = [];
+  espn.forEach((e) => {
+    const slp = slpByEspn.get(String(e.espn)) || slpByKey.get(norm(e.name) + e.pos) || null;
+    if (slp) slpUsed.add(slp.id);
+    const rec25 = e.s25 && e.s25[53] ? e.s25[53] : 0;
+    const pts25Adj = e.pts25 > 0 ? Math.round((e.pts25 - recAdj * rec25) * 10) / 10 : 0;
+    const avg25Adj = e.pts25 > 0 && e.avg25 > 0 ? Math.round(((e.avg25 * pts25Adj) / e.pts25) * 10) / 10 : 0;
+    raw.push({
+      id: "e" + e.espn, n: e.name, pos: e.pos,
+      tm: (slp && slp.team) || PROTEAM[e.teamId] || "FA",
+      proj: Math.max(0, (e.proj || 0) - recAdj * (e.projRec || 0)),
+      auc: e.auc || null,
+      adpLive: e.adp && e.adp > 0 ? Math.round(e.adp * 10) / 10 : null,
+      espnStatus: e.inj || "", espnInjured: !!e.injd,
+      slpStatus: (slp && slp.inj) || "", injPart: (slp && slp.injPart) || "",
+      injNotes: (slp && slp.notes) || "",
+      depth: slp ? slp.depth : null, age: slp ? slp.age : null, exp: slp ? slp.exp : null,
+      pts25: pts25Adj, avg25: avg25Adj, s25: e.s25 || null,
+      slpId: slp ? slp.id : null, deep: false,
+      espnId: e.espn, ht: slp ? slp.ht : null, wt: slp ? slp.wt : null, col: slp ? slp.col : null,
+    });
+  });
+  sleeper.forEach((s) => {
+    if (slpUsed.has(s.id)) return;
+    raw.push({
+      id: "s" + s.id, n: s.name, pos: s.pos, tm: s.team, proj: 0, adpLive: null, auc: null,
+      espnStatus: "", espnInjured: false, slpStatus: s.inj, injPart: s.injPart, injNotes: s.notes,
+      depth: s.depth, age: s.age, exp: s.exp, pts25: 0, avg25: 0, s25: null,
+      slpId: s.id, deep: true,
+      espnId: s.espn, ht: s.ht, wt: s.wt, col: s.col,
+    });
+  });
+
+  // team offense environment: sum of top-8 projected players per team, normalized 58–95
+  const teamProj = {};
+  raw.forEach((r) => { (teamProj[r.tm] = teamProj[r.tm] || []).push(r.proj); });
+  const envRaw = {}; let lo = Infinity, hi = -Infinity;
+  for (const t in teamProj) {
+    if (t === "FA") continue;
+    const v = teamProj[t].sort((a, b) => b - a).slice(0, 8).reduce((a, b) => a + b, 0);
+    envRaw[t] = v; lo = Math.min(lo, v); hi = Math.max(hi, v);
+  }
+  const envOf = (t) => (envRaw[t] == null || hi === lo ? 68 : Math.round(58 + ((envRaw[t] - lo) / (hi - lo)) * 37));
+
+  // projection percentile within position (proxy for talent/usage → auto scheme-fit grade)
+  const posLists = {};
+  raw.forEach((r) => { if (r.proj > 0) (posLists[r.pos] = posLists[r.pos] || []).push(r.proj); });
+  for (const k in posLists) posLists[k].sort((a, b) => b - a);
+  const posIdxOf = (r) => {
+    const l = posLists[r.pos] || [];
+    const i = l.indexOf(r.proj);
+    return i < 0 ? l.length : i;
+  };
+
+  // live RB2 per team — used to repair handcuff pointers when the old backup moved on
+  const rb2ByTeam = new Map();
+  sleeper.forEach((s) => { if (s.pos === "RB" && s.depth === 2 && s.team && !rb2ByTeam.has(s.team)) rb2ByTeam.set(s.team, s.name); });
+
+  const players = raw.map((r) => {
+    const key = norm(r.n) + r.pos;
+    const cur0 = curByKey.get(key);
+    // scouted opinions expire on a team change — the note/grades/cuff were written for the old situation
+    const cur = cur0 && cur0.tm === r.tm ? cur0 : null;
+    let cuff = cur ? cur.cuff : undefined;
+    if (cuff && cuff !== "—") {
+      const c = slpByKey.get(norm(cuff) + "RB");
+      if (!c || c.team !== r.tm) cuff = rb2ByTeam.get(r.tm); // old handcuff left town — point at the live RB2
+    }
+    const fpm = fpByKey.get(key) || fpByTeamPos.get(r.tm + r.pos) || null;
+    const injTag = resolveInjury(r.espnStatus, r.espnInjured, r.slpStatus, r.injPart);
+
+    const sv = sosView(r.tm, r.pos, sosCfg);
+    const sosR = sv.rank;
+    const sos = sosGrade(sosR) || 72;
+    const off = envOf(r.tm);
+    const cmp = r.depth === 1 ? (r.pos === "QB" ? 92 : 85) : r.depth === 2 ? 63 : r.depth >= 3 ? 48 : 60;
+    let sch = 52, posRankLabel = null;
+    if (r.proj > 0) {
+      const l = posLists[r.pos], i = posIdxOf(r);
+      const pct = l.length > 1 ? 1 - i / (l.length - 1) : 1;
+      sch = Math.round(55 + pct * 38);
+      posRankLabel = r.pos + (i + 1);
+    }
+    let dur = 86;
+    if (injTag === "Q") dur -= 16;
+    else if (injTag === "D") dur -= 26;
+    else if (injTag === "OUT" || injTag === "IR" || injTag === "PUP") dur -= 38;
+    else if (injTag === "SUS") dur -= 24;
+    if (r.pos === "RB" && r.age >= 28) dur -= 10;
+    else if (r.age >= 31) dur -= 6;
+    dur = Math.max(35, dur);
+
+    const injText = injTag ? ` · currently ${injTag}${r.injPart ? " (" + r.injPart.toLowerCase() + ")" : ""}` : "";
+    const autoNote = r.deep
+      ? `Deep-roster player — no 2026 mock-draft projection yet. Auto-graded from live roster data: ${r.depth ? "depth chart #" + r.depth : "no depth-chart slot"}${injText}.`
+      : `Auto-graded from live data: ${posRankLabel || r.pos} by 2026 projection (${Math.round(r.proj)} pts) · ${r.depth ? "depth chart #" + r.depth : "depth chart n/a"} · offense environment ${off}/100${injText}.`;
+
+    return {
+      id: r.id, n: r.n, pos: r.pos, tm: r.tm,
+      adp: r.adpLive != null ? r.adpLive : cur0 ? cur0.adp : 999,
+      f: cur ? (sosR ? { ...cur.f, sos } : cur.f) : { sch, off, cmp, sos, dur },
+      sosRank: sosR, sosWin: sv.win, sosRegRank: sv.regRank, sosPoRank: sv.poRank,
+      note: cur ? cur.note : autoNote,
+      cuff,
+      curated: !!cur,
+      inj: injTag, injPart: r.injPart, injNotes: r.injNotes,
+      bye: fpm && fpm.bye != null && fpm.bye !== "" ? +fpm.bye : null, // FP sends byes as strings — normalize so week comparisons work
+      tier: fpm ? fpm.tier : null, ecr: fpm ? fpm.ecr : null,
+      proj: r.proj, posRank: posRankLabel,
+      pts25: r.pts25, avg25: r.avg25, s25: r.s25,
+      age: r.age, exp: r.exp, depth: r.depth,
+      trending: r.slpId ? trendSet.has(r.slpId) : false,
+      ht: r.ht, wt: r.wt, col: r.col,
+      auc: r.auc, sc: scLabelOf(lg.scoring), lgTeams: lg.teams,
+      photos: r.pos === "DST"
+        ? (r.tm && r.tm !== "FA" ? [`https://sleepercdn.com/images/team_logos/nfl/${r.tm.toLowerCase()}.png`] : [])
+        : [
+            r.slpId ? `https://sleepercdn.com/content/nfl/players/thumb/${r.slpId}.jpg` : null,
+            r.espnId ? `https://a.espncdn.com/i/headshots/nfl/players/full/${r.espnId}.png` : null,
+          ].filter(Boolean),
+    };
+  });
+
+  // value over replacement: projected points above the last league-wide starter at the position
+  const starterCounts = lgStarterCounts(lg);
+  const projByPos = {};
+  players.forEach((p) => { if (p.proj > 0) (projByPos[p.pos] = projByPos[p.pos] || []).push(p.proj); });
+  for (const k in projByPos) projByPos[k].sort((a, b) => b - a);
+  const replOf = {};
+  for (const k in projByPos) {
+    const l = projByPos[k];
+    replOf[k] = l[Math.min(Math.max(0, Math.round(starterCounts[k] || 0) - 1), l.length - 1)] || 0;
+  }
+  players.forEach((p) => { p.par = p.proj > 0 ? Math.round(p.proj - (replOf[p.pos] || 0)) : null; });
+
+  const graded = players
+    .map((p) => ({ ...p, comp: valueGradeOf(p) }))
+    .sort((a, b) => b.comp - a.comp || (b.par == null ? -1e9 : b.par) - (a.par == null ? -1e9 : a.par) || b.proj - a.proj)
+    .map((p, i) => ({ ...p, rank: i + 1, edge: p.adp < 500 ? Math.round(p.adp - (i + 1)) : null }));
+
+  let pool = graded.filter((p) => p.adp <= 320);
+  if (pool.length < 160) pool = graded.slice(0, 240);
+  pool = pool.slice(0, 280);
+  return { graded, pool };
+}
+
+function buildSample(sosCfg, lgCfg) {
+  const lg = lgCfg || LG_DEFAULT;
+  const graded = CURATED
+    .map((p) => {
+      const sv = sosView(p.tm, p.pos, sosCfg);
+      const sosR = sv.rank;
+      const f = sosR ? { ...p.f, sos: sosGrade(sosR) } : p.f;
+      return { ...p, f, id: p.n, sosRank: sosR, sosWin: sv.win, sosRegRank: sv.regRank, sosPoRank: sv.poRank, comp: composite({ f }), curated: true, inj: "", proj: 0, trending: false, par: null, auc: null, sc: scLabelOf(lg.scoring), lgTeams: lg.teams };
+    })
+    .sort((a, b) => b.comp - a.comp)
+    .map((p, i) => ({ ...p, rank: i + 1, edge: p.adp - (i + 1) }));
+  return { graded, pool: graded };
+}
+
+/* --------------------------- arc gauges (MLB The Show style) --------------------------- */
+// Continuous red → amber → green ramp: low values sit deep red, elite values full green.
+const gaugeColor = (v) => {
+  const t = Math.max(0, Math.min(1, (v - 40) / 55)); // 40 and below = pure red, 95+ = pure green
+  return `hsl(${Math.round(8 + t * 132)}, 64%, ${Math.round(52 + t * 6)}%)`;
+};
+const polarXY = (cx, cy, r, deg) => {
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+};
+// 270° arc, open at the bottom, drawn clockwise from 7 o'clock to 5 o'clock
+function arcPath(cx, cy, r) {
+  const [x0, y0] = polarXY(cx, cy, r, -135);
+  const [x1, y1] = polarXY(cx, cy, r, 135);
+  return `M ${x0} ${y0} A ${r} ${r} 0 1 1 ${x1} ${y1}`;
+}
+// Semicircular attribute gauge: fill length tracks the value, color runs red→green.
+function Gauge({ value, size = 64, withLetter }) {
+  const v = Math.max(0, Math.min(100, Math.round(value || 0)));
+  const col = gaugeColor(v);
+  const sw = Math.max(5, size * 0.105);
+  const r = (size - sw) / 2 - 1;
+  const cx = size / 2, cy = size / 2;
+  const d = arcPath(cx, cy, r);
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
+      <path d={d} pathLength="100" stroke={C.panelLight} strokeWidth={sw} fill="none" strokeLinecap="round" />
+      <path d={d} pathLength="100" stroke={col} strokeWidth={sw} fill="none" strokeLinecap="round"
+        strokeDasharray={`${v} 100`} style={{ transition: "stroke-dasharray .55s cubic-bezier(.25,.7,.35,1), stroke .3s ease" }} />
+      <text x={cx} y={withLetter ? cy - size * 0.02 : cy + size * 0.02} textAnchor="middle" dominantBaseline="middle"
+        fill={col} fontFamily={FONT_DISPLAY} fontWeight="700" fontSize={size * 0.34}>{v}</text>
+      {withLetter && (
+        <text x={cx} y={cy + size * 0.26} textAnchor="middle" dominantBaseline="middle"
+          fill={C.muted} fontFamily={FONT_DISPLAY} fontWeight="600" fontSize={size * 0.155} letterSpacing="0.5">{letter(v)}</text>
+      )}
+    </svg>
+  );
+}
+
+/* --------------------------- in-depth outlook generator --------------------------- */
+// Original prose composed from live data (stats, depth charts, projections, injuries,
+// market prices) — no provider editorial text is reproduced.
+const fmt = (n) => (n == null ? "" : Math.round(n).toLocaleString());
+const ORD = [null, null, "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth"];
+const aAn = (w) => (/^[aeiou]/i.test(w) ? "an" : "a");
+// "Knee - ACL" -> "knee/ACL", "Surgery" -> "surgery" (keep short all-caps tokens as acronyms)
+const cleanPart = (t) => t.split(/\s*-\s*/).map((seg) => seg.split(" ").map((x) => (x === x.toUpperCase() && x.length <= 4 ? x : x.toLowerCase())).join(" ")).join("/");
+
+const TEAM_CITY = { ARI: "Arizona", ATL: "Atlanta", BAL: "Baltimore", BUF: "Buffalo", CAR: "Carolina", CHI: "Chicago", CIN: "Cincinnati", CLE: "Cleveland", DAL: "Dallas", DEN: "Denver", DET: "Detroit", GB: "Green Bay", HOU: "Houston", IND: "Indianapolis", JAX: "Jacksonville", KC: "Kansas City", LAC: "Los Angeles", LAR: "Los Angeles", LV: "Las Vegas", MIA: "Miami", MIN: "Minnesota", NE: "New England", NO: "New Orleans", NYG: "New York", NYJ: "New York", PHI: "Philadelphia", PIT: "Pittsburgh", SEA: "Seattle", SF: "San Francisco", TB: "Tampa Bay", TEN: "Tennessee", WAS: "Washington" };
+const TEAM_NICK = { ARI: "the Cardinals", ATL: "the Falcons", BAL: "the Ravens", BUF: "the Bills", CAR: "the Panthers", CHI: "the Bears", CIN: "the Bengals", CLE: "the Browns", DAL: "the Cowboys", DEN: "the Broncos", DET: "the Lions", GB: "the Packers", HOU: "the Texans", IND: "the Colts", JAX: "the Jaguars", KC: "the Chiefs", LAC: "the Chargers", LAR: "the Rams", LV: "the Raiders", MIA: "the Dolphins", MIN: "the Vikings", NE: "the Patriots", NO: "the Saints", NYG: "the Giants", NYJ: "the Jets", PHI: "the Eagles", PIT: "the Steelers", SEA: "the Seahawks", SF: "the 49ers", TB: "the Buccaneers", TEN: "the Titans", WAS: "the Commanders" };
+
+// "Amon-Ra St. Brown" -> "St. Brown"; "Brian Thomas Jr." -> "Thomas"
+function lastName(n) {
+  const parts = n.replace(/\s+(Jr\.?|Sr\.?|II|III|IV|V)$/i, "").trim().split(" ");
+  if (parts.length >= 3 && /^(St\.?|Van|Von|De|Del|La)$/i.test(parts[parts.length - 2])) {
+    return parts.slice(-2).join(" ");
+  }
+  return parts[parts.length - 1];
+}
+
+// stable per-player hash so each card keeps the same phrasing between renders,
+// but different players get different sentence shapes
+const seedOf = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; };
+
+function statLine25(p) {
+  const s = p.s25;
+  if (!s || !p.pts25) return null;
+  const bits = [];
+  if (p.pos === "QB") {
+    if (s[3]) bits.push(`${fmt(s[1])}/${fmt(s[0])} · ${fmt(s[3])} pass yds · ${s[4] || 0} TD · ${s[20] || 0} INT`);
+    if (s[24]) bits.push(`${fmt(s[24])} rush yds · ${s[25] || 0} rush TD`);
+  } else {
+    if (s[23]) bits.push(`${fmt(s[23])} att · ${fmt(s[24])} rush yds · ${s[25] || 0} TD`);
+    if (s[53] || s[58]) bits.push(`${s[53] || 0}/${s[58] || 0} rec · ${fmt(s[42])} rec yds · ${s[43] || 0} TD`);
+  }
+  const g = p.avg25 > 0 ? Math.round(p.pts25 / p.avg25) : null;
+  bits.push(`${p.pts25} ${p.sc || "PPR"}${g ? ` in ${g} gm (${p.avg25}/g)` : ""}`);
+  return "2025: " + bits.join("  |  ");
+}
+
+function genOutlook(p) {
+  const seed = seedOf(p.n + "|" + (p.id || ""));
+  const pk = (salt, arr) => arr[(seed + salt) % arr.length];
+  // rank-aware pick: consecutive players in a list rotate through different shapes,
+  // so neighboring cards never read off the same skeleton
+  const pkR = (salt, arr) => arr[(seed + (p.rank || 0) + salt) % arr.length];
+  const sc = p.sc || "PPR";
+  const last = p.pos === "DST" ? p.n.replace(/\s*D\/ST$/i, "").trim() + " defense" : lastName(p.n);
+  const city = TEAM_CITY[p.tm] || null;
+  const nick = TEAM_NICK[p.tm] || null;
+  const posWord = { QB: "quarterback", RB: "back", WR: "receiver", TE: "tight end", K: "kicker", DST: "defense" }[p.pos] || "player";
+  const s = p.s25 || {};
+  const hasStats = p.pts25 > 0;
+  const g = hasStats && p.avg25 > 0 ? Math.round(p.pts25 / p.avg25) : null;
+  const adpR = p.adp < 500 ? Math.round(p.adp) : null;
+  const lgT = p.lgTeams || 12;
+  const rd = adpR ? Math.max(1, Math.ceil(adpR / lgT)) : null;
+  const yearBit =
+    p.exp >= 1 && ORD[p.exp + 1] ? `his ${ORD[p.exp + 1]} season` :
+    p.exp != null && p.exp >= 1 ? `year ${p.exp + 1}` : "the season";
+
+  /* ---- building blocks; each takes `lead` (opens the summary, use the name)
+     or not (mid-paragraph, use a pronoun) ---- */
+
+  const envPhrase =
+    p.f.off >= 85 ? pk(1, [
+      "the offense around him is one of the best in football",
+      "he plays in an offense that should score with anybody",
+      "the situation around him is about as good as it gets",
+      "few players enjoy a better supporting cast",
+    ]) :
+    p.f.off >= 72 ? pk(1, [
+      "the offense around him is solid if unspectacular",
+      "he plays in a middle-of-the-pack offense",
+      "the supporting cast is decent, not elite",
+      "the offense around him won't win him weeks, but it won't lose them either",
+    ]) : pk(1, [
+      "the offense around him projects near the bottom of the league",
+      "he'll have to fight a shaky offense to get there",
+      "the situation around him does him no favors",
+      "the offense is the part of the profile nobody would choose",
+    ]);
+  const roleBit =
+    p.pos === "DST" ? "the team defense" :
+    p.depth === 1 ? (p.pos === "QB" ? "the unquestioned starter" : p.pos === "K" ? "the starting kicker" : p.pos === "RB" ? pk(8, ["the lead back", "the clear No. 1 back"]) : p.pos === "WR" ? pk(8, ["a locked-in starter", "a fixture in the starting lineup"]) : "the starting tight end") :
+    p.depth === 2 ? `the No. 2 ${posWord}` :
+    p.depth >= 3 ? "a long shot buried on the depth chart" :
+    "a player still looking for a defined role";
+
+  const sitSent = (lead) => {
+    if (p.exp === 0) {
+      const rookieRole =
+        p.depth === 1 ? "already penciled in as the starter" :
+        p.depth === 2 ? "opening camp as the No. 2" :
+        p.depth >= 3 ? "opening well down the depth chart" : "still carving out his role";
+      return lead
+        ? `${last} ${city ? `lands in ${city}` : "enters the league"} as a rookie${p.age ? ` at ${p.age}` : ""}, ${rookieRole} — and ${envPhrase}.`
+        : `The rookie ${city ? `landed in ${city}` : "enters the league"} ${rookieRole}, and ${envPhrase}.`;
+    }
+    if (lead) return pkR(0, [
+      `${last} heads into ${yearBit}${city ? ` in ${city}` : ""} as ${roleBit}, and ${envPhrase}.`,
+      p.age
+        ? `The ${p.age}-year-old is ${roleBit}${nick ? ` for ${nick}` : ""} entering ${yearBit}, and ${envPhrase}.`
+        : `${last} enters ${yearBit} as ${roleBit}${nick ? ` for ${nick}` : ""}, and ${envPhrase}.`,
+      `${last}${p.age ? `, now ${p.age},` : ""} is ${roleBit}${city ? ` in ${city}` : ""} heading into ${yearBit}, and ${envPhrase}.`,
+      nick ? `Another year, another season of ${nick} counting on ${last} as ${roleBit} — and ${envPhrase}.` : `${last} heads into ${yearBit} as ${roleBit}, and ${envPhrase}.`,
+    ]);
+    return pk(0, [
+      `He heads into ${yearBit}${city ? ` in ${city}` : ""} as ${roleBit}, and ${envPhrase}.`,
+      `Entering ${yearBit}${p.age ? ` at ${p.age}` : ""}, he's ${roleBit}${nick ? ` for ${nick}` : ""}, and ${envPhrase}.`,
+      `He's ${roleBit}${city ? ` in ${city}` : ""} heading into ${yearBit}, and ${envPhrase}.`,
+    ]);
+  };
+
+  const statSent = (lead) => {
+    if (!hasStats) {
+      if (p.exp === 0) return lead
+        ? `${last} hasn't taken an NFL snap yet, so this is all projection and draft capital for now.`
+        : `He hasn't taken an NFL snap yet, so this is all projection and draft capital for now.`;
+      return pk(2, [
+        `${lead ? last : "He"} barely made a statistical dent in 2025, which keeps expectations in check.`,
+        `2025 came and went without much production${lead ? ` for ${last}` : ""} to point to.`,
+        `There isn't a 2025 stat line worth quoting${lead ? ` for ${last}` : ""}, and that tells its own story.`,
+      ]);
+    }
+    if (p.pos === "K" || p.pos === "DST") {
+      return `${lead ? last : "He"} put up ${p.pts25} fantasy points in 2025${g ? ` over ${g} games (${p.avg25} a week)` : ""}.`;
+    }
+    let line;
+    if (p.pos === "QB") {
+      line = `completed ${fmt(s[1])} of ${fmt(s[0])} passes for ${fmt(s[3])} yards with ${s[4] || 0} touchdowns against ${s[20] || 0} interceptions`;
+      if (s[24] >= 150) line += `, adding ${fmt(s[24])} rushing yards and ${s[25] || 0} scores on the ground`;
+    } else if (p.pos === "RB") {
+      line = `turned ${fmt(s[23])} carries into ${fmt(s[24])} rushing yards and ${s[25] || 0} touchdowns`;
+      if (s[53]) line += `, catching ${s[53]} of ${s[58] || s[53]} targets for ${fmt(s[42])} yards${s[43] ? ` and ${s[43]} more scores` : ""}`;
+    } else {
+      line = `caught ${fmt(s[53])} of ${fmt(s[58])} targets for ${fmt(s[42])} yards and ${s[43] || 0} touchdowns`;
+      if (s[23] >= 5) line += `, mixing in ${fmt(s[24])} yards on the ground`;
+    }
+    const tail = g ? ` over ${g} games (${p.avg25} a week)` : "";
+    if (lead) return pkR(2, [
+      `${last}'s 2025 tape is easy to summarize: he ${line}, ${p.pts25} ${sc} points${tail}.`,
+      `Start with the production — last year ${last} ${line}, good for ${p.pts25} ${sc} points${tail}.`,
+      `The 2025 résumé speaks first: ${last} ${line}, piling up ${p.pts25} ${sc} points${tail}.`,
+    ]);
+    return pk(2, [
+      `Last season he ${line}, good for ${p.pts25} ${sc} points${tail}.`,
+      `In 2025 he ${line} — ${p.pts25} ${sc} points${tail}.`,
+      `A year ago he ${line}, finishing with ${p.pts25} ${sc} points${tail}.`,
+    ]);
+  };
+
+  /* ---- player-specific angles: say what's actually distinctive ---- */
+  const angles = [];
+  if (g != null) {
+    const missed = 17 - g;
+    if (g >= 17) angles.push({ w: 3, t: pk(11, [
+      `He answered the bell all 17 weeks, and at this position availability is a skill.`,
+      `Durability wasn't a question — he didn't miss a single game.`,
+    ]) });
+    else if (missed >= 4) angles.push({ w: (missed - 2) * 2, t: pk(11, [
+      `He missed ${missed} games, and that availability question is baked into the price.`,
+      `The ${missed} missed games are the number the market can't unsee.`,
+    ]) });
+  }
+  if (p.pos === "RB" && s[23] >= 100) {
+    const ypc = s[24] / s[23];
+    if (ypc >= 5) angles.push({ w: 6, t: pk(12, [
+      `The efficiency pops off the page: ${ypc.toFixed(1)} yards every time he touched it.`,
+      `He averaged ${ypc.toFixed(1)} a carry, elite territory for the position.`,
+    ]) });
+    else if (ypc <= 3.7) angles.push({ w: 6, t: pk(12, [
+      `The ${ypc.toFixed(1)} yards per carry is the quiet worry in the profile.`,
+      `Efficiency lagged at ${ypc.toFixed(1)} a carry, so the volume has to keep carrying the day.`,
+    ]) });
+    if (s[23] >= 280) angles.push({ w: s[23] >= 320 ? 8 : 6, t: pk(13, [
+      `${s[23]} carries is true workhorse usage — there aren't many of those left in this league.`,
+      `A ${s[23]}-carry workload tells you exactly how his coaches see him.`,
+    ]) });
+  }
+  if ((p.pos === "WR" || p.pos === "TE") && s[58] >= 80) {
+    const cr = s[53] / s[58];
+    if (s[58] >= 150) angles.push({ w: 6, t: pk(12, [
+      `A ${s[58]}-target diet is the kind of volume that forgives everything else.`,
+      `${s[58]} targets is a role that isn't going anywhere.`,
+    ]) });
+    if (cr >= 0.72) angles.push({ w: 5, t: pk(13, [
+      `He caught ${Math.round(cr * 100)}% of what came his way — the targets are quality, not just quantity.`,
+      `${Math.round(cr * 100) >= 80 && Math.round(cr * 100) < 90 ? "An" : "A"} ${Math.round(cr * 100)}% catch rate on that workload is genuinely hard to do.`,
+    ]) });
+    else if (cr <= 0.55) angles.push({ w: 5, t: pk(13, [
+      `The ${Math.round(cr * 100)}% catch rate hints at a downfield, boom-or-bust role.`,
+      `He converted just ${Math.round(cr * 100)}% of his targets, so volatility comes with the territory.`,
+    ]) });
+  }
+  if (p.pos === "QB" && hasStats) {
+    if (s[24] >= 600) angles.push({ w: 7, t: pk(12, [
+      `The rushing floor is the cheat code — ${fmt(s[24])} yards on the ground steadies every bad passing week.`,
+      `${fmt(s[24])} rushing yards gives him a weekly floor most passers can't touch.`,
+    ]) });
+    else if (s[24] <= 150 && s[3] >= 3000) angles.push({ w: 3, t: pk(12, [
+      `It's all arm — he offers almost nothing as a runner, so the passing volume has to hold up.`,
+      `With no rushing production to lean on, he needs the pass game humming every single week.`,
+    ]) });
+  }
+  if (p.pos !== "QB" && hasStats && p.pts25 > 100) {
+    const tds = (s[25] || 0) + (s[43] || 0);
+    if (tds >= 10 && (tds * 6) / p.pts25 >= 0.35) angles.push({ w: 5, t: pk(14, [
+      `${tds} touchdowns did a lot of the heavy lifting, and touchdowns are fickle year to year.`,
+      `Be honest about the ${tds} scores — that's a big slice of the value, and it can regress.`,
+    ]) });
+  }
+  if (p.sosRank) {
+    const winBit = p.sosWin === "blend" ? " across your league's weeks" : p.sosWin && p.sosWin !== "wk 1-18" ? ` over ${p.sosWin.replace("wk ", "weeks ")}` : " this season";
+    if (p.sosRank <= 5) angles.push({ w: 4, t: pk(17, [
+      `The schedule is on his side too — ${nick || "his team"} ${nick ? "draw" : "draws"} the ${ordinal(p.sosRank)}-easiest slate for ${posWord}s${winBit}.`,
+      `Add in the ${ordinal(p.sosRank)}-friendliest ${p.pos} schedule in the league${winBit}, and the path gets even smoother.`,
+    ]) });
+    else if (p.sosRank >= 28) angles.push({ w: 4, t: pk(17, [
+      `The schedule does him no favors${winBit} — ${p.sosRank === 32 ? "no team faces" : `only ${32 - p.sosRank} team${32 - p.sosRank === 1 ? " faces" : "s face"}`} a tougher slate for ${posWord}s.`,
+      `Factor in the ${ordinal(33 - p.sosRank)}-toughest ${p.pos} schedule in football${winBit}, and the weekly matchups will test him.`,
+    ]) });
+    if (p.sosWin === "blend" && p.sosRegRank != null && p.sosPoRank != null && Math.abs(p.sosRegRank - p.sosPoRank) >= 15) {
+      angles.push({ w: 5, t: p.sosPoRank > p.sosRegRank
+        ? `One schedule wrinkle: a friendly ${ordinal(p.sosRegRank)} slate during the regular season flips to the ${ordinal(33 - p.sosPoRank)}-toughest in the fantasy playoffs.`
+        : `The schedule leans his way when it matters most — ${ordinal(p.sosRegRank)} during the regular season, but the ${ordinal(p.sosPoRank)}-easiest in the fantasy playoffs.` });
+    }
+  }
+  angles.sort((a, b) => b.w - a.w);
+  const angleTexts = angles.slice(0, pk(15, [1, 2])).map((a) => a.t);
+
+  const mktSent = (lead) => {
+    if (!(p.proj > 0)) return pk(3, [
+      `${lead ? last + " is" : "He's"} going undrafted in mocks, so he costs nothing to monitor${p.bye ? ` (bye week ${p.bye})` : ""}.`,
+      `Nobody is drafting ${lead ? last : "him"} right now, which makes him a free stash${p.bye ? ` (bye week ${p.bye})` : ""}.`,
+      `${lead ? last + " requires" : "He requires"} no draft pick at all — just a waiver claim if the situation breaks right.`,
+    ]);
+    let mkt;
+    if (lead && adpR) {
+      mkt = pk(3, [
+        `The market has made up its mind on ${last}: pick ${adpR}, a Round ${rd} price in ${lgT}-team leagues`,
+        `Drafters are treating ${last} as a Round ${rd} pick (ADP ${adpR})`,
+      ]) + `, against a projection of ${fmt(p.proj)} points${p.posRank ? ` (${p.posRank})` : ""}`;
+    } else {
+      mkt = pk(3, [
+        `Projections peg him for ${fmt(p.proj)} points${p.posRank ? ` (${p.posRank})` : ""}`,
+        `The 2026 projection sits at ${fmt(p.proj)} points${p.posRank ? ` (${p.posRank})` : ""}`,
+        `He projects to ${fmt(p.proj)} fantasy points${p.posRank ? ` (${p.posRank})` : ""}`,
+      ]);
+      if (adpR) mkt += pk(4, [
+        `, and he's coming off draft boards around pick ${adpR}`,
+        `, with drafts pricing him around pick ${adpR}`,
+        `, and the market has him going near pick ${adpR}`,
+        rd ? `, and he's costing a Round ${rd} pick in ${lgT}-team leagues` : `, and the market has him going near pick ${adpR}`,
+      ]);
+    }
+    if (adpR) {
+      if (p.edge != null && p.edge > 4) mkt += pk(16, [
+        ` — the model has him ${p.edge} spots earlier than that, which is where the value lives`,
+        ` — the model would take him ${p.edge} picks sooner, so the discount is real`,
+      ]);
+      else if (p.edge != null && p.edge < -4) mkt += pk(16, [
+        ` — richer than the model's #${p.rank}, so you'd be paying up to get him`,
+        ` — the model has him at #${p.rank}, a good deal later than the market does`,
+      ]);
+      else mkt += pk(16, [`, right about where the model lands too`, ` — and for once the model and the market agree`]);
+    }
+    let out = mkt + ".";
+    if (p.tier) out += " " + pk(5, [
+      `The expert crowd broadly agrees, slotting him in tier ${p.tier}.`,
+      `Expert consensus has him in tier ${p.tier}.`,
+      `FantasyPros' experts group him in tier ${p.tier}.`,
+    ]);
+    return out;
+  };
+
+  /* ---- assemble: vary the whole architecture per player so neighboring cards never rhyme.
+     Some summaries lead with the verdict, some with the sharpest stat angle, some with the
+     situation; the body order shuffles across six shapes and the verdict can land up front. ---- */
+  const parts = { sit: sitSent, stat: statSent, mkt: mktSent };
+  const archPool = hasStats
+    ? [["sit", "stat", "mkt"], ["stat", "sit", "mkt"], ["mkt", "sit", "stat"], ["stat", "mkt", "sit"], ["sit", "mkt", "stat"], ["mkt", "stat", "sit"]]
+    : [["sit", "stat", "mkt"], ["mkt", "sit", "stat"], ["sit", "mkt", "stat"]];
+  const seq = pkR(9, archPool);
+
+  // verdict tied to the composite grade AND the price signal — computed first so it can lead
+  const verdict =
+    !p.proj ? pk(7, [
+      "Track his depth-chart movement through camp before spending anything to acquire him.",
+      "One to keep tabs on through August, nothing more yet.",
+      "File the name away; the data will say when it's time to act.",
+      "Watchlist material — nothing here demands a roster spot yet.",
+    ]) :
+    p.edge != null && p.edge < -15 && p.comp >= 72 ? pk(7, [
+      "The talent is real, but at today's price the model would let another manager pay the premium.",
+      "Great player, wrong price — let someone else make the reach.",
+      "If he slides a couple of rounds he's interesting; at the current cost, pass.",
+      "Paying full retail here means paying for the best case. The model doesn't.",
+    ]) :
+    p.edge != null && p.edge > 15 && p.comp >= 78 ? pk(7, [
+      "One of the model's favorite bargains on the board.",
+      "This is the kind of discount worth planning a draft around.",
+      "Circle him — value like this is how leagues get won in July.",
+      "The market is napping on him, and the model would happily take advantage.",
+    ]) :
+    p.comp >= 88 ? pk(7, [
+      "Draft him as a foundational piece.",
+      "Build your roster around him and don't overthink it.",
+      "He belongs in the first tier of your board, full stop.",
+      "As close to a no-questions pick as this position offers.",
+    ]) :
+    p.comp >= 80 ? pk(7, [
+      "The model sees a cornerstone-caliber pick at cost.",
+      "Worth taking a few picks before you feel comfortable.",
+      "A player you draft expecting to start every week without stress.",
+      "Not a headline pick — just one you'll quietly be glad you made.",
+    ]) :
+    p.comp >= 72 ? pk(7, [
+      "A dependable mid-round target.",
+      "A steady mid-round pick who won't sink your season.",
+      "Exactly the kind of unsexy pick that fills out a winning roster.",
+      "Fine at cost; better if he falls a round.",
+    ]) :
+    p.comp >= 62 ? pk(7, [
+      "A late-round dart with a definable path to relevance.",
+      "Worth a late flier if the fit makes sense for your roster.",
+      "Cheap enough that the upside case is the only case that matters.",
+      "A name for the last rounds, when process beats certainty.",
+    ]) :
+    "Only rosterable if the situation around him changes.";
+
+  const mix = seed + (p.rank || 0);
+  const verdictFirst = p.proj > 0 && mix % 4 === 0;           // every ~4th card leads with the call
+  const angleLead = !verdictFirst && angleTexts.length > 0 && mix % 3 === 0; // others open on the sharpest stat
+
+  const sent = [];
+  if (verdictFirst) {
+    sent.push(`${pk(18, ["The short version:", "Bottom line first:", "The call:", "Verdict up front:"])} ${verdict.charAt(0).toLowerCase()}${verdict.slice(1)}`);
+  }
+  let angleQueue = angleTexts.slice();
+  if (angleLead) {
+    sent.push(angleQueue[0].replace(/^He /, `${last} `)); // opener gets the name, not a floating pronoun
+    angleQueue = angleQueue.slice(1);
+  }
+  seq.forEach((k, i) => {
+    sent.push(parts[k](i === 0 && !angleLead));
+    if (k === "stat" && angleQueue.length) { angleQueue.forEach((t) => sent.push(t)); angleQueue = []; }
+  });
+  if (angleQueue.length) angleQueue.forEach((t) => sent.push(t)); // statless shapes still get their angles
+
+  // risk flags
+  const flags = [];
+  if (p.inj) {
+    const injName = { Q: "Questionable", D: "Doubtful", OUT: "ruled Out", IR: "on injured reserve", PUP: "on the PUP list", SUS: "suspended" }[p.inj] || p.inj;
+    let injBit = `he's currently ${injName}`;
+    if (p.injPart) { const part = cleanPart(p.injPart); injBit += ` with ${aAn(part)} ${part} issue`; }
+    if (p.injNotes) injBit += ` (${cleanPart(p.injNotes)})`;
+    flags.push(injBit);
+  }
+  if (p.pos === "RB" && p.age >= 28) flags.push(`at ${p.age} he's on the wrong side of the running back aging curve`);
+  if (p.trending) flags.push(`he's been one of the most-added players in fantasy over the past day, so news may be moving`);
+  if (flags.length) sent.push(`${pk(6, ["The fine print:", "The caveats:", "What could go wrong:", "Before you draft him, know this:", "Two eyes open, though:", "Worth flagging:"])} ${flags.join("; ")}.`);
+
+  if (!verdictFirst) sent.push(verdict);
+
+  return sent.join(" ");
+}
+
+/* --------------------------- player bio (photo + measurables) --------------------------- */
+// Sleeper stores height in inches ("73"); older records are already formatted ("6'1\"")
+const fmtHt = (h) => {
+  if (!h) return null;
+  const n = parseInt(h, 10);
+  return !isNaN(n) && n > 12 ? `${Math.floor(n / 12)}'${n % 12}"` : String(h);
+};
+
+function PlayerPhoto({ p, size }) {
+  const [i, setI] = useState(0);
+  const srcs = p.photos || [];
+  if (i >= srcs.length) {
+    const initials = p.n.split(" ").map((w) => w[0]).slice(0, 2).join("");
+    return (
+      <div style={{ width: size, height: size, flex: "none", borderRadius: 8, background: C.panelLight, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: size / 2.6, color: C.muted }}>
+        {initials}
+      </div>
+    );
+  }
+  return (
+    <img src={srcs[i]} alt={p.n} referrerPolicy="no-referrer" onError={() => setI(i + 1)}
+      style={{ width: size, height: size, flex: "none", borderRadius: 8, background: C.panelLight, border: `1px solid ${C.line}`, objectFit: "cover", objectPosition: "top" }} />
+  );
+}
+
+function TeamLogo({ tm, size }) {
+  const [i, setI] = useState(0);
+  if (!tm || tm === "FA") return null;
+  const srcs = [
+    `https://sleepercdn.com/images/team_logos/nfl/${tm.toLowerCase()}.png`,
+    `https://a.espncdn.com/i/teamlogos/nfl/500/${(tm === "WAS" ? "wsh" : tm).toLowerCase()}.png`,
+  ];
+  if (i >= srcs.length) return null;
+  const teamName = TEAM_NICK[tm] ? TEAM_NICK[tm].replace(/^the /, "") : tm;
+  return (
+    <img src={srcs[i]} alt={teamName} title={`${TEAM_CITY[tm] || ""} ${teamName}`.trim()} referrerPolicy="no-referrer"
+      onError={() => setI(i + 1)}
+      style={{ width: size, height: size, flex: "none", objectFit: "contain", filter: "drop-shadow(0 1px 2px rgba(0,0,0,.45))" }} />
+  );
+}
+
+function BioStat({ label, value }) {
+  if (value == null) return null;
+  return (
+    <div>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 2, color: C.muted }}>{label}</div>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 600, color: C.chalk }}>{value}</div>
+    </div>
+  );
+}
+
+function PlayerBio({ p }) {
+  const hasAny = (p.photos && p.photos.length > 0) || p.ht || p.wt || p.col || p.exp != null || (p.tm && p.tm !== "FA");
+  if (!hasAny) return null;
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 12, background: C.panelLight, border: `1px solid ${C.line}`, borderRadius: 8, padding: 10 }}>
+      <PlayerPhoto p={p} size={64} />
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center", flex: 1 }}>
+        <BioStat label="HT" value={fmtHt(p.ht)} />
+        <BioStat label="WT" value={p.wt ? `${p.wt} lbs` : null} />
+        <BioStat label="NFL SEASONS" value={p.exp == null ? null : p.exp === 0 ? "Rookie" : p.exp} />
+        <BioStat label="COLLEGE" value={p.col} />
+        <BioStat label="AGE" value={p.age} />
+      </div>
+      <TeamLogo tm={p.tm} size={52} />
+    </div>
+  );
+}
+
+/* --------------------------- player outlook card --------------------------- */
+function Tag({ text, color, solid }) {
+  return (
+    <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, fontWeight: 700, letterSpacing: 1, padding: "1px 6px", borderRadius: 4, marginLeft: 6, background: solid ? color : "transparent", color: solid ? C.turf : color, border: `1px solid ${color}`, verticalAlign: "middle" }}>
+      {text}
+    </span>
+  );
+}
+
+// small labelled metric chip for the secondary stat row (ECR / PAR / AAV)
+function Chip({ label, value, color, hi, title }) {
+  return (
+    <span title={title} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: hi ? `${C.flag}22` : C.panelLight, border: `1px solid ${hi ? C.flag : C.line}`, borderRadius: 4, padding: "1px 7px", fontSize: 11.5, letterSpacing: 0.3 }}>
+      <span style={{ color: C.muted, fontWeight: 600 }}>{label}</span>
+      <b style={{ color: color || C.chalk }}>{value}</b>
+    </span>
+  );
+}
+
+function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline }) {
+  const [open, setOpen] = useState(!compact);
+  const [drafting, setDrafting] = useState(false);
+  const key = markKeyOf(p);
+  const mk = (marks && marks[key] && marks[key].m) || null;
+  const note = (marks && marks[key] && marks[key].note) || "";
+  const takenLabel = pickLabel === "TAKEN";
+  const doPick = (e) => {
+    e.stopPropagation();
+    if (drafting) return;
+    setDrafting(true);
+    setTimeout(() => onPick(p), 400); // let the draft animation play before the card is removed
+  };
+  return (
+    <div className={"pcard" + (drafting ? " dl-drafted" : "")} style={{ position: "relative", background: C.panel, border: `1px solid ${drafting ? C.flag : C.line}`, borderRadius: 8, padding: 16, marginBottom: 12 }}>
+      {drafting && (
+        <div className="dl-draft-badge" style={{ position: "absolute", inset: 0, zIndex: 3, borderRadius: 8, background: `${C.turf}d9`, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 28, letterSpacing: 3, color: takenLabel ? C.muted : C.flag }}>
+          <span style={{ fontSize: 30 }}>{takenLabel ? "✕" : "✓"}</span>{takenLabel ? "OFF THE BOARD" : "DRAFTED!"}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, cursor: compact ? "pointer" : "default" }} onClick={() => compact && setOpen(!open)}>
+        <div className="pc-grade" title="Value grade — projected points above replacement (your league settings) blended 65/35 with FantasyPros expert-consensus rank, nudged by availability & schedule"
+          style={{ flex: "none", minWidth: 58, textAlign: "center", lineHeight: 1 }}>
+          <Gauge value={p.comp} size={56} />
+          <div style={{ fontSize: 10, color: C.muted, letterSpacing: 2, fontFamily: FONT_DISPLAY, marginTop: 1 }}>GRADE</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="pc-name" style={{ fontFamily: FONT_DISPLAY, fontSize: 24, fontWeight: 600, color: C.chalk, letterSpacing: 0.5 }}>
+            {p.n} <span style={{ color: C.muted, fontSize: 17 }}>{p.pos} · {p.tm}</span>
+            {p.inj && <Tag text={p.inj} color={C.risk} solid />}
+            {mk === "t" && <Tag text="⭐ TARGET" color={C.good} />}
+            {mk === "a" && <Tag text="🚫 AVOID" color={C.risk} />}
+            {p.trending && <Tag text="🔥 TRENDING" color={C.flag} />}
+            {p.curated ? <Tag text="SCOUTED" color={C.flag} /> : <Tag text="AUTO" color={C.muted} />}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 13, color: C.muted, marginTop: 3 }}>
+            <span title="Model rank"><b style={{ color: C.chalk }}>#{p.rank}</b></span>
+            <span style={{ color: C.line }}>·</span>
+            <span>ADP {p.adp < 500 ? p.adp : "—"}</span>
+            {p.bye ? <><span style={{ color: C.line }}>·</span><span>BYE {p.bye}</span></> : null}
+            {p.edge == null ? (
+              <span style={{ fontStyle: "italic" }}>undrafted</span>
+            ) : (
+              <span style={{ background: `${(p.edge > 4 ? C.good : p.edge < -4 ? C.risk : C.muted)}22`, color: p.edge > 4 ? C.good : p.edge < -4 ? C.risk : C.muted, fontWeight: 700, borderRadius: 4, padding: "1px 7px", fontSize: 12 }}>
+                {p.edge > 0 ? `+${p.edge} vs ADP` : p.edge < 0 ? `${p.edge} vs ADP` : "priced right"}
+              </span>
+            )}
+            {p.ecr != null && (
+              <Chip label="ECR" value={`#${p.ecr}${p.adp < 500 && Math.abs(p.adp - p.ecr) >= 12 ? " ⚠" : ""}`}
+                hi={p.adp < 500 && Math.abs(p.adp - p.ecr) >= 12}
+                title={p.adp < 500 && Math.abs(p.adp - p.ecr) >= 12 ? "ESPN drafters and FantasyPros experts disagree here — value often hides in the gap" : "FantasyPros expert-consensus rank"} />
+            )}
+            {p.par != null && (
+              <Chip label="PAR" value={p.par > 0 ? `+${p.par}` : p.par} color={p.par > 0 ? C.good : C.muted}
+                title="Points Above Replacement: projected points vs the last league-wide starter at his position, using your league settings" />
+            )}
+            {p.auc > 0 && <Chip label="AAV" value={`$${Math.round(p.auc)}`} title="ESPN average auction value" />}
+          </div>
+          {subline && <div style={{ fontSize: 12, color: C.flag, marginTop: 5, fontFamily: FONT_DISPLAY, letterSpacing: 0.5 }}>{subline}</div>}
+        </div>
+        {onMark && (
+          <button onClick={(e) => { e.stopPropagation(); onMark(key, { m: mk === "t" ? "a" : mk === "a" ? null : "t" }); }}
+            title="Click to cycle: target ⭐ → avoid 🚫 → clear"
+            style={{ background: "transparent", color: C.muted, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 9px", fontSize: 15, cursor: "pointer", flex: "none" }}>
+            {mk === "t" ? "⭐" : mk === "a" ? "🚫" : "☆"}
+          </button>
+        )}
+        {onPick && (
+          <button onClick={doPick} disabled={drafting}
+            style={{ background: takenLabel ? C.panelLight : C.flag, color: takenLabel ? C.chalk : C.turf, border: takenLabel ? `1px solid ${C.line}` : "none", borderRadius: 6, padding: "8px 14px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16, letterSpacing: 1, cursor: drafting ? "default" : "pointer", flex: "none" }}>
+            {pickLabel || "DRAFT"}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="dl-expand" style={{ marginTop: 14 }}>
+          <PlayerBio p={p} />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 6px", justifyContent: "space-around", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 8, padding: "12px 8px 10px", marginBottom: 10 }}>
+            {FACTOR_META.map(([k, label, hint]) => {
+              let ht = hint, sub = null;
+              if (k === "sos" && p.sosRank) {
+                sub = `${sosLabel(p.sosRank, p.pos)}${p.sosWin && p.sosWin !== "wk 1-18" ? ` · ${p.sosWin}` : ""}`;
+                if (p.sosWin === "blend") ht = `Blended slate: 70% regular season (${ordinal(p.sosRegRank)}) + 30% fantasy playoffs (${ordinal(p.sosPoRank)}) — change in the SCHEDULE GRADE settings up top`;
+              }
+              return (
+                <div key={k} title={ht} style={{ textAlign: "center", flex: "1 1 96px", minWidth: 92, maxWidth: 150 }}>
+                  <Gauge value={p.f[k]} size={72} withLetter />
+                  <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: C.muted, marginTop: 3, lineHeight: 1.25 }}>{label}</div>
+                  {sub && <div style={{ fontSize: 10.5, color: C.flag, marginTop: 2, lineHeight: 1.3 }}>{sub}</div>}
+                </div>
+              );
+            })}
+          </div>
+          {p.pos === "RB" && p.f.hc != null && (
+            <div style={{ fontSize: 13, color: C.muted, margin: "6px 0" }}>
+              Handcuff: <b style={{ color: C.chalk }}>{p.cuff}</b> · insurance priority{" "}
+              <b style={{ color: gradeColor(p.f.hc) }}>{p.f.hc}/100</b>
+              {p.f.hc >= 75 && <span style={{ color: C.flag }}> — draft the backup too</span>}
+            </div>
+          )}
+          <p style={{ fontFamily: FONT_BODY, fontSize: 14, lineHeight: 1.5, color: C.chalk, marginTop: 8, marginBottom: 0, borderLeft: `3px solid ${p.curated ? C.flag : C.line}`, paddingLeft: 10 }}>
+            {p.note}
+          </p>
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px dashed ${C.line}` }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, color: C.muted }}>IN-DEPTH OUTLOOK</div>
+            {statLine25(p) && (
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 0.5, color: C.flag, margin: "6px 0 2px" }}>
+                {statLine25(p)}
+              </div>
+            )}
+            <p style={{ fontFamily: FONT_BODY, fontSize: 14, lineHeight: 1.55, color: C.chalk, margin: "6px 0 0" }}>
+              {genOutlook(p)}
+            </p>
+          </div>
+          {onMark && (
+            <input value={note} placeholder="Your draft note for this player (saved in this browser)…"
+              onChange={(e) => onMark(key, { note: e.target.value })} onClick={(e) => e.stopPropagation()}
+              style={{ width: "100%", boxSizing: "border-box", marginTop: 10, background: C.turf, border: `1px dashed ${C.line}`, borderRadius: 6, padding: "8px 10px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 13, outline: "none" }} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------- search / outlook view --------------------------- */
+const RENDER_CAP = 60;
+const SORTS = [
+  ["rank", "MODEL", (a, b) => a.rank - b.rank],
+  ["adp", "ADP", (a, b) => (a.adp < 500 ? a.adp : 1e9) - (b.adp < 500 ? b.adp : 1e9)],
+  ["par", "PAR", (a, b) => (b.par == null ? -1e9 : b.par) - (a.par == null ? -1e9 : a.par)],
+  ["ecr", "EXPERT", (a, b) => (a.ecr || 1e9) - (b.ecr || 1e9)],
+];
+function SearchView({ players, marks, onMark }) {
+  const [q, setQ] = useState("");
+  const [pos, setPos] = useState("ALL");
+  const [sortBy, setSortBy] = useState("rank");
+  const [flt, setFlt] = useState("all"); // all | targets | avoids
+  const list = useMemo(() => {
+    let l = players;
+    if (pos !== "ALL") l = l.filter((p) => p.pos === pos);
+    if (q) l = l.filter((p) => (p.n + p.tm).toLowerCase().includes(q.toLowerCase()));
+    if (flt !== "all") l = l.filter((p) => { const m = marks[markKeyOf(p)]; return m && m.m === (flt === "targets" ? "t" : "a"); });
+    const cmp = (SORTS.find(([id]) => id === sortBy) || SORTS[0])[2];
+    return [...l].sort(cmp);
+  }, [players, q, pos, sortBy, flt, marks]);
+  const markCount = (kind) => players.reduce((n, p) => { const m = marks[markKeyOf(p)]; return n + (m && m.m === kind ? 1 : 0); }, 0);
+  const btn = (active, onClick, label, key) => (
+    <button key={key} onClick={onClick}
+      style={{ background: active ? C.flag : C.panel, color: active ? C.turf : C.muted, border: `1px solid ${active ? C.flag : C.line}`, borderRadius: 6, padding: "7px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, fontSize: 13, cursor: "pointer" }}>
+      {label}
+    </button>
+  );
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search any of the full player pool…"
+          style={{ flex: 1, minWidth: 200, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 14px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 15, outline: "none" }} />
+        {["ALL", "QB", "RB", "WR", "TE", "K", "DST"].map((p) => btn(pos === p, () => setPos(p), p, p))}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 2, color: C.muted }}>SORT</span>
+        {SORTS.map(([id, label]) => btn(sortBy === id, () => setSortBy(id), label, "s" + id))}
+        <span style={{ width: 1, alignSelf: "stretch", background: C.line, margin: "0 4px" }} />
+        {btn(flt === "all", () => setFlt("all"), "ALL", "fall")}
+        {btn(flt === "targets", () => setFlt(flt === "targets" ? "all" : "targets"), `⭐ TARGETS${markCount("t") ? ` (${markCount("t")})` : ""}`, "ft")}
+        {btn(flt === "avoids", () => setFlt(flt === "avoids" ? "all" : "avoids"), `🚫 AVOIDS${markCount("a") ? ` (${markCount("a")})` : ""}`, "fa")}
+      </div>
+      {list.length === 0 && <p style={{ color: C.muted }}>{flt !== "all" ? `No ${flt} yet — tap the ☆ on any player to mark them.` : "No players match. Try a shorter search."}</p>}
+      {list.length > RENDER_CAP && (
+        <p style={{ color: C.muted, fontSize: 13 }}>Showing top {RENDER_CAP} of {list.length} by {(SORTS.find(([id]) => id === sortBy) || SORTS[0])[1].toLowerCase()} — refine the search to see deeper players.</p>
+      )}
+      {list.slice(0, RENDER_CAP).map((p) => <PlayerCard key={p.id} p={p} compact marks={marks} onMark={onMark} />)}
+    </div>
+  );
+}
+
+/* --------------------------- post-draft grade --------------------------- */
+// Self-calibrating: your starters' combined PAR vs what a league-average draft would net
+// (total PAR of the top starters-pool split evenly across teams). Ratio → letter.
+function gradeDraft(roster, lg, pool) {
+  if (!roster || !roster.length) return null;
+  const lineup = buildLineup(roster, lg, null, null, null);
+  const starters = lineup.slots.filter((s) => s.r);
+  const myPAR = starters.reduce((a, s) => a + Math.max(0, s.r.p.par || 0), 0);
+  const topN = pool.filter((p) => p.par != null).sort((a, b) => b.par - a.par).slice(0, lgStarters(lg) * lg.teams);
+  const expected = topN.reduce((a, p) => a + Math.max(0, p.par), 0) / lg.teams;
+  const ratio = expected > 0 ? myPAR / expected : 1;
+  const letterG = ratio >= 1.25 ? "A+" : ratio >= 1.12 ? "A" : ratio >= 1.03 ? "A-" : ratio >= 0.96 ? "B+" : ratio >= 0.88 ? "B" : ratio >= 0.8 ? "B-" : ratio >= 0.7 ? "C+" : ratio >= 0.6 ? "C" : "D";
+  const bullets = [];
+  const posPar = {};
+  roster.forEach((p) => { if (p.par > 0) posPar[p.pos] = (posPar[p.pos] || 0) + p.par; });
+  const ranked = Object.entries(posPar).sort((a, b) => b[1] - a[1]);
+  if (ranked.length) bullets.push(`Strength: ${ranked[0][0]} (+${Math.round(ranked[0][1])} PAR combined).`);
+  if (ranked.length > 1) {
+    const weak = ranked[ranked.length - 1];
+    if (weak[1] < ranked[0][1] * 0.3) bullets.push(`Thinnest: ${weak[0]}.`);
+  }
+  const val = roster.filter((p) => p.edge != null && p.edge >= 10).length;
+  if (val) bullets.push(`${val} value pick${val > 1 ? "s" : ""} beat ADP by 10+ spots.`);
+  const empty = [...new Set(lineup.slots.filter((s) => !s.r).map((s) => s.label))];
+  if (empty.length) bullets.push(`Unfilled starters: ${empty.join(", ")} — hit waivers.`);
+  const byes = {};
+  roster.forEach((p) => { if (p.bye) byes[p.bye] = (byes[p.bye] || 0) + 1; });
+  const wb = Object.entries(byes).sort((a, b) => b[1] - a[1])[0];
+  if (wb && wb[1] >= 3) bullets.push(`Bye pileup: ${wb[1]} players out week ${wb[0]}.`);
+  const cuffs = roster.filter((rb) => rb.pos === "RB" && rb.cuff && roster.some((x) => x.n === rb.cuff)).length;
+  if (cuffs) bullets.push(`${cuffs} handcuff pair${cuffs > 1 ? "s" : ""} secured.`);
+  const score = Math.round(Math.max(40, Math.min(99, 64 + (ratio - 0.95) * 90)));
+  return { letter: letterG, ratio, score, bullets, myPAR: Math.round(myPAR) };
+}
+function DraftRecap({ roster, lg, pool }) {
+  const g = gradeDraft(roster, lg, pool);
+  if (!g) return null;
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "center", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, margin: "12px 0", flexWrap: "wrap" }}>
+      <div style={{ textAlign: "center", flex: "none" }}>
+        <Gauge value={g.score} size={64} withLetter />
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 2, color: C.muted, marginTop: 2 }}>DRAFT GRADE</div>
+      </div>
+      <div style={{ flex: 1, minWidth: 240, fontSize: 13, color: C.chalk, lineHeight: 1.6 }}>
+        Your projected starters total <b style={{ color: C.good }}>+{g.myPAR} PAR</b> — {Math.round(g.ratio * 100)}% of a league-average draft haul. {g.bullets.join(" ")}
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- pick recommendation banner --------------------------- */
+function RecoBanner({ reco }) {
+  if (!reco) return null;
+  const p = reco.p;
+  const mk = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  return (
+    <div style={{ background: `${C.flag}1c`, border: `1px solid ${C.flag}`, borderRadius: 8, padding: "11px 15px", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, color: C.flag, fontWeight: 700 }}>★ TAKE</span>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: C.chalk }}>{p.n}</span>
+        <span style={{ color: C.muted, fontSize: 14 }}>
+          {p.pos} · {p.tm} · grade <b style={{ color: gradeColor(p.comp) }}>{p.comp}</b>{p.par != null ? <> · PAR <b style={{ color: p.par > 0 ? C.good : C.muted }}>{p.par > 0 ? "+" + p.par : p.par}</b></> : null}
+        </span>
+      </div>
+      <div style={{ color: C.chalk, fontSize: 13, marginTop: 5, lineHeight: 1.5 }}>
+        {mk(reco.reasons.join(" · "))}
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- mock draft view --------------------------- */
+function DraftView({ pool, lg, marks, onMark, onSaveTeam }) {
+  const TEAMS = lg.teams;
+  const [userSlot, setUserSlot] = useState(0);
+  const [started, setStarted] = useState(false);
+  const [aiMode, setAiMode] = useState("adp"); // "adp" = realistic room, "model" = factor-model room
+  const [picks, setPicks] = useState([]); // {player, owner}
+  const rounds = Math.min(lgStarters(lg) + lg.bench, Math.floor(pool.length / TEAMS));
+  const totalPicks = rounds * TEAMS;
+
+  const taken = new Set(picks.map((p) => p.player.id));
+  const takenNames = new Set(picks.map((p) => p.player.n));
+  const available = pool.filter((p) => !taken.has(p.id));
+  const pickIdx = picks.length;
+  const done = pickIdx >= totalPicks;
+
+  const rosterOf = (slot) => picks.filter((p) => p.owner === slot).map((p) => p.player);
+
+  const caps = {
+    QB: lg.qb + lg.sf + 1, RB: lg.rb + Math.ceil(lg.flex / 2) + 2, WR: lg.wr + Math.ceil(lg.flex / 2) + 2,
+    TE: lg.te + 1, K: lg.k, DST: lg.dst,
+  };
+  const need = (slot, pos) => {
+    const have = rosterOf(slot).filter((p) => p.pos === pos).length;
+    return have < (caps[pos] || 0) ? 14 : -12 * (have - (caps[pos] || 0) + 1);
+  };
+
+  // K/DST wait for the closing rounds, like real rooms
+  const kdstPenalty = (p, idx) =>
+    (p.pos === "K" || p.pos === "DST") && Math.floor(idx / TEAMS) + 1 <= rounds - (lg.k + lg.dst) - 1 ? 500 : 0;
+  // "adp": realistic room drafting near live ADP with noise. "model": AI drafts on the factor model.
+  const aiValue = (slot, p, idx) =>
+    aiMode === "adp"
+      ? 600 - (p.adp < 500 ? p.adp : 450) + need(slot, p.pos) * 1.5 + Math.random() * 14 - kdstPenalty(p, idx)
+      : (200 - p.rank * 2) + (p.comp - 70) * 1.4 + (p.edge || 0) * 0.8 + need(slot, p.pos) + Math.random() * 10 - kdstPenalty(p, idx);
+
+  const advanceAI = (curPicks) => {
+    const newPicks = [...curPicks];
+    while (newPicks.length < totalPicks) {
+      const slot = snakeOwner(newPicks.length, TEAMS);
+      if (slot === userSlot) break;
+      const takenNow = new Set(newPicks.map((x) => x.player.id));
+      const avail = pool.filter((p) => !takenNow.has(p.id));
+      if (avail.length === 0) break;
+      const idx = newPicks.length;
+      const pick = avail.reduce((a, b) => (aiValue(slot, a, idx) >= aiValue(slot, b, idx) ? a : b));
+      newPicks.push({ player: pick, owner: slot });
+    }
+    return newPicks;
+  };
+
+  const start = () => { setStarted(true); setPicks(advanceAI([])); };
+  const userPick = (p) => setPicks(advanceAI([...picks, { player: p, owner: userSlot }]));
+  const reset = () => { setStarted(false); setPicks([]); };
+
+  if (!started)
+    return (
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 24, maxWidth: 480 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>MOCK DRAFT SETUP</div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>
+          {TEAMS} teams · {rounds} rounds · snake, over a live pool of {pool.length} draftable players (set league size and roster in LEAGUE settings up top).
+        </p>
+        <label style={{ color: C.muted, fontFamily: FONT_DISPLAY, letterSpacing: 1, fontSize: 14 }}>THE {TEAMS - 1} AI TEAMS DRAFT BY</label>
+        <div style={{ display: "flex", gap: 6, margin: "8px 0 14px" }}>
+          {[["adp", "LIVE ADP (REALISTIC)"], ["model", "FACTOR MODEL"]].map(([id, label]) => (
+            <button key={id} onClick={() => setAiMode(id)}
+              title={id === "adp" ? "Opponents pick close to market ADP with a little noise — practice against how your league actually drafts" : "Opponents draft off this site's factor model — scheme fits and clear-path players go early"}
+              style={{ background: aiMode === id ? C.flag : C.panelLight, color: aiMode === id ? C.turf : C.muted, border: `1px solid ${aiMode === id ? C.flag : C.line}`, borderRadius: 6, padding: "7px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 13, letterSpacing: 1, cursor: "pointer" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <label style={{ color: C.muted, fontFamily: FONT_DISPLAY, letterSpacing: 1, fontSize: 14 }}>YOUR DRAFT SLOT</label>
+        <div style={{ display: "flex", gap: 6, margin: "8px 0 18px", flexWrap: "wrap" }}>
+          {Array.from({ length: TEAMS }, (_, i) => (
+            <button key={i} onClick={() => setUserSlot(i)}
+              style={{ width: 40, height: 40, borderRadius: 6, border: `1px solid ${userSlot === i ? C.flag : C.line}`, background: userSlot === i ? C.flag : C.panelLight, color: userSlot === i ? C.turf : C.chalk, fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, cursor: "pointer" }}>
+              {i + 1}
+            </button>
+          ))}
+        </div>
+        <button onClick={start} style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "12px 24px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, letterSpacing: 2, cursor: "pointer" }}>
+          KICK OFF
+        </button>
+      </div>
+    );
+
+  const myRoster = rosterOf(userSlot);
+  const best = available.slice(0, 8);
+  const myNext = nextPickOf(userSlot, pickIdx + 1, TEAMS);
+  const reco = recommendPick(available, myRoster, lg, myNext);
+  const comparableLeft = (p) => available.filter((x) => x.pos === p.pos && x.id !== p.id && x.proj >= 0.88 * p.proj).length;
+  const sublineOf = (p) => {
+    const sv = pSurvive(p.adp, myNext + 1);
+    const cmp = p.proj > 0 ? comparableLeft(p) : null;
+    return [
+      sv != null ? `${sv}% survives to your next pick (${pickLabelOf(myNext, TEAMS)})` : null,
+      cmp != null ? `${cmp} comparable ${p.pos}${cmp === 1 ? "" : "s"} left` : null,
+    ].filter(Boolean).join(" · ") || null;
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ flex: 2, minWidth: 300 }}>
+        {!done ? (
+          <>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, color: C.chalk, letterSpacing: 1, marginBottom: 4 }}>
+              ROUND {Math.floor(pickIdx / TEAMS) + 1} · PICK {pickIdx + 1} — <span style={{ color: C.flag }}>YOU'RE ON THE CLOCK</span>
+            </div>
+            <p style={{ color: C.muted, fontSize: 13, marginTop: 0 }}>Best available by model grade. "+value" flags where the model disagrees with live ADP.</p>
+            <RecoBanner reco={reco} />
+            {best.map((p) => <PlayerCard key={p.id} p={p} compact onPick={userPick} marks={marks} onMark={onMark} subline={sublineOf(p)} />)}
+          </>
+        ) : (
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 20 }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, color: C.flag, letterSpacing: 1 }}>DRAFT COMPLETE</div>
+            <DraftRecap roster={myRoster} lg={lg} pool={pool} />
+            <p style={{ color: C.muted, fontSize: 14 }}>Full board below. Save this roster to MY TEAM for weekly start/sit and waiver advice, or reset to try again.</p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {onSaveTeam && myRoster.length > 0 && (
+                <button onClick={() => onSaveTeam(myRoster.map((p) => p.id))}
+                  style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "10px 18px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+                  SAVE AS MY TEAM →
+                </button>
+              )}
+              <button onClick={reset} style={{ background: C.panelLight, color: C.chalk, border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 18px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+                RESET DRAFT
+              </button>
+            </div>
+          </div>
+        )}
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, color: C.muted, letterSpacing: 2 }}>DRAFT BOARD</div>
+          <div style={{ maxHeight: 300, overflowY: "auto", marginTop: 8, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+            {picks.map((pk, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, padding: "6px 12px", fontSize: 13, background: pk.owner === userSlot ? `${C.flag}22` : i % 2 ? C.panel : "transparent", color: C.chalk }}>
+                <span style={{ color: C.muted, minWidth: 44 }}>{Math.floor(i / TEAMS) + 1}.{(i % TEAMS) + 1}</span>
+                <span style={{ minWidth: 64, color: pk.owner === userSlot ? C.flag : C.muted }}>{pk.owner === userSlot ? "YOU" : `Team ${pk.owner + 1}`}</span>
+                <span style={{ flex: 1 }}>{pk.player.n}</span>
+                <span style={{ color: C.muted }}>{pk.player.pos}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{ flex: 1, minWidth: 240 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, color: C.muted, letterSpacing: 2 }}>YOUR ROSTER</div>
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginTop: 8 }}>
+          {myRoster.length === 0 && <span style={{ color: C.muted, fontSize: 13 }}>No picks yet.</span>}
+          {myRoster.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14, color: C.chalk }}>
+              <span>{p.n}</span>
+              <span style={{ color: gradeColor(p.comp) }}>{p.pos} · {p.comp}</span>
+            </div>
+          ))}
+          {(() => {
+            const rbs = myRoster.filter((p) => p.pos === "RB" && p.f.hc >= 72 && p.cuff && !takenNames.has(p.cuff));
+            return rbs.length > 0 ? (
+              <div style={{ marginTop: 10, fontSize: 12, color: C.flag }}>
+                ⚑ Handcuff alert: {rbs.map((p) => p.cuff).join(", ")} still on the board.
+              </div>
+            ) : null;
+          })()}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- schedule settings --------------------------- */
+function SosSettings({ cfg, onChange }) {
+  const poOpts = PO_WINDOWS[cfg.reg] || [];
+  const canPo = poOpts.length > 0 && !!cfg.po;
+  const setReg = (reg) => {
+    const pos = PO_WINDOWS[reg] || [];
+    const po = pos.some(([k]) => k === cfg.po) ? cfg.po : pos.length ? pos[0][0] : null;
+    const mode = (cfg.mode === "po" || cfg.mode === "blend") && !po ? "reg" : cfg.mode;
+    onChange({ ...cfg, reg, po, mode });
+  };
+  const selStyle = { background: C.panelLight, color: C.chalk, border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 6px", fontFamily: FONT_BODY, fontSize: 12 };
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, color: C.muted }} title="Which weeks the Schedule factor grades against">
+        SCHEDULE GRADE
+      </span>
+      <div style={{ display: "flex", gap: 4 }}>
+        {SOS_MODES.map(([id, label]) => {
+          const disabled = (id === "po" || id === "blend") && !canPo;
+          return (
+            <button key={id} onClick={() => !disabled && onChange({ ...cfg, mode: id })} disabled={disabled}
+              title={disabled ? "fftoolbox has no table for playoffs starting after week 15 — set the regular season to 1-13 or 1-14" : id === "blend" ? "70% regular-season schedule + 30% fantasy-playoff schedule" : ""}
+              style={{ background: cfg.mode === id ? C.flag : "transparent", color: disabled ? C.line : cfg.mode === id ? C.turf : C.muted, border: `1px solid ${cfg.mode === id ? C.flag : C.line}`, borderRadius: 4, padding: "3px 8px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: 1, cursor: disabled ? "default" : "pointer" }}>
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      <label style={{ fontSize: 12, color: C.muted }}>
+        Reg season wk{" "}
+        <select value={cfg.reg} onChange={(e) => setReg(e.target.value)} style={selStyle}>
+          {REG_WINDOWS.map(([k, w]) => <option key={k} value={k}>{w}</option>)}
+        </select>
+      </label>
+      <label style={{ fontSize: 12, color: C.muted }}>
+        Playoffs wk{" "}
+        {poOpts.length ? (
+          <select value={cfg.po || ""} onChange={(e) => onChange({ ...cfg, po: e.target.value })} style={selStyle}>
+            {poOpts.map(([k, w]) => <option key={k} value={k}>{w}</option>)}
+          </select>
+        ) : (
+          <span style={{ color: C.risk }} title="fftoolbox publishes no playoff table starting after week 15">n/a for this split</span>
+        )}
+      </label>
+    </div>
+  );
+}
+
+/* --------------------------- league settings bar --------------------------- */
+function LeagueSettings({ lg, onChange }) {
+  const selStyle = { background: C.panelLight, color: C.chalk, border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 4px", fontFamily: FONT_BODY, fontSize: 12 };
+  const sel = (key, label, opts) => (
+    <label key={key} style={{ fontSize: 12, color: C.muted }}>
+      {label}{" "}
+      <select value={lg[key]} onChange={(e) => onChange({ ...lg, [key]: parseInt(e.target.value, 10) })} style={selStyle}>
+        {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+      <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 2, color: C.muted }}
+        title="Scoring re-prices every projection; roster shape drives replacement value, the mock draft and the tracker">
+        LEAGUE
+      </span>
+      <div style={{ display: "flex", gap: 4 }}>
+        {SCORINGS.map(([id, label]) => (
+          <button key={id} onClick={() => onChange({ ...lg, scoring: id })}
+            style={{ background: lg.scoring === id ? C.flag : "transparent", color: lg.scoring === id ? C.turf : C.muted, border: `1px solid ${lg.scoring === id ? C.flag : C.line}`, borderRadius: 4, padding: "3px 8px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: 1, cursor: "pointer" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {sel("teams", "Teams", [8, 9, 10, 11, 12, 13, 14])}
+      {sel("qb", "QB", [0, 1, 2])}
+      {sel("rb", "RB", [1, 2, 3])}
+      {sel("wr", "WR", [1, 2, 3, 4])}
+      {sel("te", "TE", [0, 1, 2])}
+      {sel("flex", "FLEX", [0, 1, 2, 3])}
+      {sel("sf", "SFLX", [0, 1])}
+      {sel("k", "K", [0, 1])}
+      {sel("dst", "DST", [0, 1])}
+      {sel("bench", "BN", [3, 4, 5, 6, 7, 8])}
+    </div>
+  );
+}
+
+/* --------------------------- tier board --------------------------- */
+function TierBoard({ players, takenIds, marks }) {
+  const takenSet = takenIds || new Set();
+  const cols = ["QB", "RB", "WR", "TE"];
+  return (
+    <div>
+      <p style={{ color: C.muted, fontSize: 13, marginTop: 0 }}>
+        FantasyPros expert tiers, live. Players logged in the DRAFT TRACKER are struck out here; a tier down to its last player is flagged — that's a now-or-never pick.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", overflowX: "auto" }}>
+        {cols.map((c) => {
+          const list = players.filter((p) => p.pos === c && p.tier != null && p.ecr != null).sort((a, b) => a.ecr - b.ecr).slice(0, 40);
+          const tiers = [];
+          list.forEach((p) => {
+            if (!tiers.length || tiers[tiers.length - 1].t !== p.tier) tiers.push({ t: p.tier, ps: [] });
+            tiers[tiers.length - 1].ps.push(p);
+          });
+          return (
+            <div key={c} style={{ flex: 1, minWidth: 175 }}>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, letterSpacing: 2, color: C.flag, textAlign: "center", marginBottom: 6 }}>{c}</div>
+              {tiers.map(({ t, ps }) => {
+                const left = ps.filter((p) => !takenSet.has(p.id)).length;
+                const last = left === 1 && ps.length > 1;
+                return (
+                  <div key={t} style={{ background: C.panel, border: `1px solid ${last ? C.flag : C.line}`, borderRadius: 6, padding: "6px 8px", marginBottom: 8 }}>
+                    <div style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 1, color: last ? C.flag : C.muted }}>
+                      TIER {t}{last ? " — LAST ONE ⚑" : ` · ${left}/${ps.length} left`}
+                    </div>
+                    {ps.map((p) => {
+                      const gone = takenSet.has(p.id);
+                      const mk = marks && marks[markKeyOf(p)] && marks[markKeyOf(p)].m;
+                      return (
+                        <div key={p.id} style={{ fontSize: 13, padding: "2px 0", color: gone ? C.line : C.chalk, textDecoration: gone ? "line-through" : "none" }}>
+                          {mk === "t" ? "⭐ " : mk === "a" ? "🚫 " : ""}{p.n} <span style={{ color: gone ? C.line : C.muted }}>{p.tm}{p.bye ? ` · ${p.bye}` : ""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- live draft tracker --------------------------- */
+function DraftTracker({ pool, lg, track, setTrack, marks, onMark, onSaveTeam }) {
+  const [q, setQ] = useState("");
+  const [sortBy, setSortBy] = useState("grade");
+  const [view, setView] = useState("list");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importMsg, setImportMsg] = useState(null);
+  const teams = track.teams || lg.teams;
+  const byId = useMemo(() => { const m = new Map(); pool.forEach((p) => m.set(p.id, p)); return m; }, [pool]);
+  const picks = (track.picks || []).map((id) => byId.get(id)).filter(Boolean);
+  const takenIds = new Set(track.picks || []);
+  const pickIdx = picks.length;
+  const rounds = lgStarters(lg) + lg.bench;
+  const totalPicks = rounds * teams;
+  const done = pickIdx >= totalPicks;
+  const onClock = snakeOwner(pickIdx, teams);
+  const isMe = onClock === track.slot;
+  const myNext = nextPickOf(track.slot, isMe ? pickIdx + 1 : pickIdx, teams);
+  const available = pool.filter((p) => !takenIds.has(p.id));
+
+  const logPick = (p) => setTrack({ ...track, picks: [...(track.picks || []), p.id] });
+  const undo = () => setTrack({ ...track, picks: (track.picks || []).slice(0, -1) });
+  const removeAt = (i) => setTrack({ ...track, picks: (track.picks || []).filter((_, j) => j !== i) });
+  const reset = () => setTrack({ started: false, slot: 0, teams: lg.teams, picks: [] });
+  const doImport = () => {
+    const { ids, unmatched } = parsePickList(importText, pool, track.picks || []);
+    if (ids.length) setTrack({ ...track, picks: [...(track.picks || []), ...ids] });
+    setImportMsg({ n: ids.length, unmatched });
+    if (ids.length) { setImportText(""); }
+  };
+
+  const rosterOf = (slot) => picks.filter((_, i) => snakeOwner(i, teams) === slot);
+  const myRoster = rosterOf(track.slot);
+  const reco = isMe && !done ? recommendPick(available, myRoster, lg, myNext) : null;
+
+  const comparableLeft = (p) => available.filter((x) => x.pos === p.pos && x.id !== p.id && x.proj >= 0.88 * p.proj).length;
+  const sublineOf = (p) => {
+    const sv = pSurvive(p.adp, myNext + 1);
+    const cmp = p.proj > 0 ? comparableLeft(p) : null;
+    return [
+      sv != null ? `${sv}% survives to your pick ${pickLabelOf(myNext, teams)}` : null,
+      cmp != null ? `${cmp} comparable ${p.pos}${cmp === 1 ? "" : "s"} left` : null,
+    ].filter(Boolean).join(" · ") || null;
+  };
+
+  // roster slots filled, greedy: dedicated slots first, then FLEX/superflex, rest to bench
+  const slotFill = () => {
+    const cnt = {}; myRoster.forEach((p) => { cnt[p.pos] = (cnt[p.pos] || 0) + 1; });
+    const used = {};
+    const take = (pos, n) => { const free = Math.max(0, (cnt[pos] || 0) - (used[pos] || 0)); const t = Math.min(free, n); used[pos] = (used[pos] || 0) + t; return t; };
+    const out = [];
+    let startersFilled = 0;
+    [["QB", lg.qb], ["RB", lg.rb], ["WR", lg.wr], ["TE", lg.te], ["FLEX", lg.flex], ["SFLX", lg.sf], ["K", lg.k], ["DST", lg.dst]].forEach(([lab, n]) => {
+      if (!n) return;
+      let got = 0;
+      if (lab === "FLEX") ["RB", "WR", "TE"].forEach((ps) => { got += take(ps, n - got); });
+      else if (lab === "SFLX") ["QB", "RB", "WR", "TE"].forEach((ps) => { got += take(ps, n - got); });
+      else got = take(lab, n);
+      startersFilled += got;
+      out.push([lab, got, n]);
+    });
+    out.push(["BN", Math.max(0, myRoster.length - startersFilled), lg.bench]);
+    return out;
+  };
+
+  const alerts = [];
+  if (track.started && !done) {
+    const byBye = {};
+    myRoster.forEach((p) => { if (p.bye) (byBye[p.bye] = byBye[p.bye] || []).push(p); });
+    for (const b in byBye) if (byBye[b].length >= 3) alerts.push(`Bye pileup: ${byBye[b].length} of your players sit out week ${b}.`);
+    const v = available.find((p) => p.edge != null && p.edge >= 12 && p.adp <= pickIdx + teams);
+    if (v) alerts.push(`Value falling: ${v.n} (model #${v.rank}, ADP ${Math.round(v.adp)}) is still on the board.`);
+    ["QB", "RB", "WR", "TE"].forEach((pos) => {
+      const av = available.filter((p) => p.pos === pos && p.tier != null);
+      if (!av.length) return;
+      const topTier = Math.min(...av.map((p) => p.tier));
+      const inTier = av.filter((p) => p.tier === topTier);
+      if (inTier.length === 1) alerts.push(`Last tier-${topTier} ${pos}: ${inTier[0].n}.`);
+    });
+    myRoster.filter((p) => p.pos === "RB").forEach((rb) => {
+      const live = rb.depth === 1 ? available.find((x) => x.pos === "RB" && x.tm === rb.tm && x.depth === 2) : null;
+      const cur = rb.cuff && rb.cuff !== "—" ? available.find((x) => x.n === rb.cuff) : null;
+      const cuff = cur || live;
+      if (cuff && !alerts.some((a) => a.includes(cuff.n))) alerts.push(`Handcuff for your ${rb.n}: ${cuff.n} is available.`);
+    });
+    [["QB", lg.qb + lg.sf], ["RB", lg.rb], ["WR", lg.wr], ["TE", lg.te]].forEach(([pos, needN]) => {
+      if (!needN) return;
+      const have = myRoster.filter((p) => p.pos === pos).length;
+      if (have >= needN) return;
+      const startable = available.filter((p) => p.pos === pos && p.par != null && p.par > 0).length;
+      if (startable > 0 && startable <= teams) alerts.push(`Thin at ${pos}: you need ${needN - have} more and only ${startable} startable left.`);
+    });
+  }
+
+  if (!track.started)
+    return (
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 24, maxWidth: 560 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>DRAFT TRACKER</div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.5 }}>
+          For your <b style={{ color: C.chalk }}>real draft</b>: as picks happen on ESPN/Sleeper/Yahoo, log them here in order — search a name, hit the button.
+          The board keeps best-available, survival odds to your next pick, tier alerts and your roster needs up to date. ({lg.teams} teams · {rounds} rounds — from LEAGUE settings; picks are saved in this browser, so a refresh won't lose your draft.)
+        </p>
+        <label style={{ color: C.muted, fontFamily: FONT_DISPLAY, letterSpacing: 1, fontSize: 14 }}>YOUR DRAFT SLOT</label>
+        <div style={{ display: "flex", gap: 6, margin: "8px 0 18px", flexWrap: "wrap" }}>
+          {Array.from({ length: lg.teams }, (_, i) => (
+            <button key={i} onClick={() => setTrack({ ...track, slot: i })}
+              style={{ width: 40, height: 40, borderRadius: 6, border: `1px solid ${track.slot === i ? C.flag : C.line}`, background: track.slot === i ? C.flag : C.panelLight, color: track.slot === i ? C.turf : C.chalk, fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, cursor: "pointer" }}>
+              {i + 1}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setTrack({ ...track, started: true, teams: lg.teams, picks: track.picks || [] })}
+          style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "12px 24px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, letterSpacing: 2, cursor: "pointer" }}>
+          START TRACKING
+        </button>
+      </div>
+    );
+
+  const filtered = (() => {
+    let l = available;
+    if (q) l = l.filter((p) => (p.n + p.tm + p.pos).toLowerCase().includes(q.toLowerCase()));
+    if (sortBy === "par") l = [...l].sort((a, b) => (b.par == null ? -999 : b.par) - (a.par == null ? -999 : a.par));
+    return l.slice(0, 30);
+  })();
+
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ flex: 2, minWidth: 320 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, color: C.chalk, letterSpacing: 1 }}>
+          {done ? <span style={{ color: C.flag }}>DRAFT COMPLETE</span> : (
+            <>PICK {pickLabelOf(pickIdx, teams)} — {isMe ? <span style={{ color: C.flag }}>YOU'RE ON THE CLOCK</span> : `TEAM ${onClock + 1} IS PICKING`}</>
+          )}
+        </div>
+        {done && <DraftRecap roster={myRoster} lg={lg} pool={pool} />}
+        {!done && (
+          <div style={{ fontSize: 13, color: C.muted, margin: "2px 0 10px" }}>
+            Your next pick: <b style={{ color: C.chalk }}>{pickLabelOf(myNext, teams)}</b> ({myNext - pickIdx} pick{myNext - pickIdx === 1 ? "" : "s"} away).
+            Log every pick as it happens{isMe ? " — including your own" : ""}.
+          </div>
+        )}
+        {isMe && !done && <RecoBanner reco={reco} />}
+        <div style={{ display: "flex", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+          <input value={q} autoFocus onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && filtered.length && !done) { logPick(filtered[0]); setQ(""); } }}
+            placeholder="Type a name, press ⏎ to log the top match — fast enough to keep pace…"
+            style={{ flex: 1, minWidth: 220, background: C.panel, border: `1px solid ${q ? C.flag : C.line}`, borderRadius: 6, padding: "10px 14px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 15, outline: "none" }} />
+          <button onClick={() => setSortBy(sortBy === "grade" ? "par" : "grade")} title="Toggle best-available sort"
+            style={{ background: C.panel, color: C.muted, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+            SORT: {sortBy === "grade" ? "GRADE" : "PAR"}
+          </button>
+          <button onClick={() => setView(view === "list" ? "tiers" : "list")}
+            style={{ background: C.panel, color: C.muted, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+            VIEW: {view === "list" ? "LIST" : "TIERS"}
+          </button>
+          <button onClick={undo} disabled={pickIdx === 0}
+            style={{ background: C.panel, color: pickIdx ? C.chalk : C.line, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: pickIdx ? "pointer" : "default" }}>
+            UNDO
+          </button>
+          <button onClick={() => { setImportOpen((o) => !o); setImportMsg(null); }} title="Paste a list of picks from your draft room to catch up in one shot"
+            style={{ background: importOpen ? C.flag : C.panel, color: importOpen ? C.turf : C.muted, border: `1px solid ${importOpen ? C.flag : C.line}`, borderRadius: 6, padding: "8px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+            IMPORT
+          </button>
+          <button onClick={reset}
+            style={{ background: C.panel, color: C.risk, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+            RESET
+          </button>
+        </div>
+        {importOpen && (
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>
+              Paste picks from your draft room — <b style={{ color: C.chalk }}>one per line, in draft order</b>. Pick numbers and position/team tags are fine (e.g. "1.01 Ja'Marr Chase, WR, CIN").
+            </div>
+            <textarea value={importText} onChange={(e) => setImportText(e.target.value)} rows={6}
+              placeholder={"Ja'Marr Chase\nBijan Robinson\n1.03 Justin Jefferson WR MIN\n…"}
+              style={{ width: "100%", boxSizing: "border-box", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 13, outline: "none", resize: "vertical" }} />
+            <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={doImport} disabled={!importText.trim()}
+                style={{ background: importText.trim() ? C.flag : C.panelLight, color: importText.trim() ? C.turf : C.muted, border: "none", borderRadius: 6, padding: "8px 16px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: importText.trim() ? "pointer" : "default" }}>
+                PARSE &amp; LOG
+              </button>
+              {importMsg && (
+                <span style={{ fontSize: 12, color: importMsg.unmatched.length ? C.warn : C.good }}>
+                  Logged {importMsg.n} pick{importMsg.n === 1 ? "" : "s"}{importMsg.unmatched.length ? ` · couldn't match ${importMsg.unmatched.length}: ${importMsg.unmatched.slice(0, 4).join(", ")}${importMsg.unmatched.length > 4 ? "…" : ""}` : " — all matched"}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        <div style={{ fontSize: 12, color: q && filtered.length ? C.flag : C.muted, margin: "0 0 12px", minHeight: 16 }}>
+          {q && filtered.length && !done
+            ? <>⏎ logs <b>{filtered[0].n}</b> ({filtered[0].pos}·{filtered[0].tm}) as {isMe ? "your pick" : `Team ${onClock + 1}`}</>
+            : "Tip: type any name and press Enter to log the pick instantly, or IMPORT a pasted list."}
+        </div>
+        {view === "tiers" ? (
+          <TierBoard players={pool} takenIds={takenIds} marks={marks} />
+        ) : (
+          <>
+            {filtered.map((p) => (
+              <PlayerCard key={p.id} p={p} compact marks={marks} onMark={onMark}
+                onPick={done ? null : logPick} pickLabel={isMe ? "MY PICK" : "TAKEN"} subline={sublineOf(p)} />
+            ))}
+          </>
+        )}
+        <div style={{ marginTop: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontFamily: FONT_DISPLAY, fontSize: 18, color: C.muted, letterSpacing: 2 }}>DRAFT BOARD</span>
+            {picks.length > 0 && <span style={{ fontSize: 11, color: C.muted }}>✕ to remove a mis-logged pick</span>}
+          </div>
+          <div style={{ maxHeight: 260, overflowY: "auto", marginTop: 8, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+            {picks.map((p, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, padding: "6px 12px", fontSize: 13, alignItems: "center", background: snakeOwner(i, teams) === track.slot ? `${C.flag}22` : i % 2 ? C.panel : "transparent", color: C.chalk }}>
+                <span style={{ color: C.muted, minWidth: 44 }}>{pickLabelOf(i, teams)}</span>
+                <span style={{ minWidth: 64, color: snakeOwner(i, teams) === track.slot ? C.flag : C.muted }}>
+                  {snakeOwner(i, teams) === track.slot ? "YOU" : `Team ${snakeOwner(i, teams) + 1}`}
+                </span>
+                <span style={{ flex: 1 }}>{p.n}</span>
+                <span style={{ color: C.muted }}>{p.pos}</span>
+                <button onClick={() => removeAt(i)} title="Remove this pick"
+                  style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13, padding: "0 2px", lineHeight: 1 }}>✕</button>
+              </div>
+            ))}
+            {picks.length === 0 && <div style={{ padding: "8px 12px", fontSize: 13, color: C.muted }}>No picks logged yet.</div>}
+          </div>
+        </div>
+      </div>
+      <div style={{ flex: 1, minWidth: 250 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, color: C.muted, letterSpacing: 2 }}>YOUR ROSTER</div>
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            {slotFill().map(([lab, got, n]) => (
+              <span key={lab} style={{ fontFamily: FONT_DISPLAY, fontSize: 12, letterSpacing: 1, color: got >= n ? C.good : C.muted, border: `1px solid ${C.line}`, borderRadius: 4, padding: "2px 6px" }}>
+                {lab} {got}/{n}
+              </span>
+            ))}
+          </div>
+          {myRoster.length === 0 && <span style={{ color: C.muted, fontSize: 13 }}>No picks yet.</span>}
+          {myRoster.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14, color: C.chalk }}>
+              <span>{p.n}</span>
+              <span style={{ color: gradeColor(p.comp) }}>{p.pos}{p.bye ? ` · ${p.bye}` : ""} · {p.comp}</span>
+            </div>
+          ))}
+          {onSaveTeam && myRoster.length > 0 && (
+            <button onClick={() => onSaveTeam(myRoster.map((p) => p.id))} title="Save this roster to MY TEAM for weekly start/sit + waiver advice"
+              style={{ marginTop: 10, width: "100%", background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "8px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, fontSize: 13, cursor: "pointer" }}>
+              SAVE AS MY TEAM →
+            </button>
+          )}
+        </div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, color: C.muted, letterSpacing: 2, marginTop: 16 }}>ALERTS</div>
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginTop: 8 }}>
+          {alerts.length === 0 && <span style={{ color: C.muted, fontSize: 13 }}>Nothing urgent. Draft your board.</span>}
+          {alerts.map((a, i) => (
+            <div key={i} style={{ fontSize: 13, color: C.flag, padding: "4px 0", borderBottom: i < alerts.length - 1 ? `1px dashed ${C.line}` : "none" }}>⚑ {a}</div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- printable cheat sheet --------------------------- */
+// Dark-native on screen so it belongs to the app; @media print flips it to clean white paper.
+// Styling lives in classes (not inline) precisely so the print stylesheet can restyle it.
+function CheatSheet({ graded, lg, marks }) {
+  const secs = [["QB", 24], ["RB", 48], ["WR", 48], ["TE", 20], ["K", 12], ["DST", 12]];
+  return (
+    <div id="cheat-sheet">
+      <style>{`
+        #cheat-sheet .cs-title{font-family:${FONT_DISPLAY};font-size:22px;font-weight:700;letter-spacing:1px;color:${C.chalk}}
+        #cheat-sheet .cs-sub{color:${C.muted};font-size:14px;font-weight:400}
+        #cheat-sheet .cs-card{flex:1 1 350px;min-width:330px;max-width:560px;background:${C.panel};border:1px solid ${C.line};border-radius:8px;overflow:hidden;
+          box-shadow:0 1px 3px rgba(0,0,0,.25)}
+        #cheat-sheet .cs-pos{font-family:${FONT_DISPLAY};font-weight:700;letter-spacing:2px;font-size:13px;color:${C.turf};background:${C.flag};padding:6px 12px;display:flex;justify-content:space-between;align-items:baseline}
+        #cheat-sheet .cs-pos small{font-weight:600;letter-spacing:.5px;font-size:10.5px;opacity:.75}
+        #cheat-sheet table{border-collapse:collapse;width:100%;font-size:11.5px;table-layout:fixed}
+        #cheat-sheet th{font-family:${FONT_DISPLAY};letter-spacing:.8px;font-size:10px;color:${C.muted};text-align:left;padding:6px 5px 4px;border-bottom:1px solid ${C.line};white-space:nowrap}
+        #cheat-sheet td{padding:3.5px 5px;color:${C.chalk};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        #cheat-sheet col.c-idx{width:26px}#cheat-sheet col.c-tm{width:34px}#cheat-sheet col.c-sm{width:30px}#cheat-sheet col.c-md{width:36px}
+        #cheat-sheet tbody tr:nth-child(even){background:${C.turf}66}
+        #cheat-sheet .num{text-align:right;font-variant-numeric:tabular-nums}
+        #cheat-sheet th.num{text-align:right}
+        #cheat-sheet .mut{color:${C.muted}}
+        #cheat-sheet .cuff{color:${C.muted};font-size:10.5px}
+        #cheat-sheet .gr{font-weight:700}
+        #cheat-sheet tr.avoid td{text-decoration:line-through;opacity:.5}
+        #cheat-sheet tr.tgt .pn{font-weight:700;color:${C.flag}}
+        #cheat-sheet .cs-legend{font-size:11px;color:${C.muted};margin-top:14px;line-height:1.5}
+        @media print{
+          #cheat-sheet .cs-title,#cheat-sheet td{color:#111}
+          #cheat-sheet .cs-card{background:#fff;border:1px solid #999;border-radius:0;box-shadow:none;break-inside:avoid;max-width:none}
+          #cheat-sheet .cs-pos{background:#111;color:#fff}
+          #cheat-sheet tbody tr:nth-child(even){background:#F1F1F1}
+          #cheat-sheet th{color:#444;border-bottom-color:#111}
+          #cheat-sheet .cs-sub,#cheat-sheet .mut,#cheat-sheet .cuff,#cheat-sheet .cs-legend{color:#555}
+          #cheat-sheet .gr,#cheat-sheet .par{color:#111 !important}
+          #cheat-sheet tr.tgt .pn{color:#111}
+        }
+      `}</style>
+      <div className="cs-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+        <div className="cs-title">
+          CHEAT SHEET <span className="cs-sub">· {scLabelOf(lg.scoring)} · {lg.teams} teams · model order · {new Date().toLocaleDateString()}</span>
+        </div>
+        <button className="no-print" onClick={() => window.print()}
+          style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "9px 18px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+          🖨 PRINT / PDF
+        </button>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-start" }}>
+        {secs.map(([pos, n]) => {
+          const list = graded.filter((p) => p.pos === pos).slice(0, n);
+          if (!list.length) return null;
+          return (
+            <div key={pos} className="cs-card">
+              <div className="cs-pos"><span>{pos === "DST" ? "DEFENSE / ST" : pos}</span><small>TOP {list.length}</small></div>
+              <table>
+                <colgroup>
+                  <col className="c-idx" /><col /><col className="c-tm" /><col className="c-sm" /><col className="c-sm" />
+                  <col className="c-sm" /><col className="c-md" /><col className="c-md" /><col className="c-md" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th className="num">#</th><th>PLAYER</th><th>TM</th><th className="num">BYE</th><th className="num" title="FantasyPros expert tier">TR</th>
+                    <th className="num" title="Draft Lab value grade">GR</th><th className="num" title="Points above replacement">PAR</th>
+                    <th className="num">ADP</th><th className="num" title="Expert consensus rank">ECR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {list.map((p, i) => {
+                    const mk = marks && marks[markKeyOf(p)] && marks[markKeyOf(p)].m;
+                    return (
+                      <tr key={p.id} className={mk === "a" ? "avoid" : mk === "t" ? "tgt" : ""}>
+                        <td className="num mut">{i + 1}</td>
+                        <td className="pn" title={p.n + (p.cuff && p.cuff !== "—" ? ` · handcuff: ${p.cuff}` : "")}>
+                          {mk === "t" ? "⭐ " : ""}{p.n}
+                          {p.cuff && p.cuff !== "—" ? <span className="cuff"> · cuff {p.cuff}</span> : null}
+                        </td>
+                        <td className="mut">{p.tm}</td>
+                        <td className="num mut">{p.bye || "—"}</td>
+                        <td className="num mut">{p.tier || "—"}</td>
+                        <td className="num gr" style={{ color: gaugeColor(p.comp) }}>{p.comp}</td>
+                        <td className="num par" style={{ color: p.par > 0 ? C.good : C.muted }}>{p.par != null ? (p.par > 0 ? "+" + p.par : p.par) : "—"}</td>
+                        <td className="num">{p.adp < 500 ? Math.round(p.adp) : "—"}</td>
+                        <td className="num">{p.ecr || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+      </div>
+      <div className="cs-legend">
+        ⭐ highlighted = your targets · struck through = your avoids · TR = expert tier · GR = model grade (color = quality) · PAR = points above replacement for your league settings · schedule window per SCHEDULE GRADE. Print gives a clean black-and-white paper version.
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- my team view (start/sit + waivers) --------------------------- */
+function MyTeamView({ graded, lg, myTeam, setMyTeam, track, sched }) {
+  // opponent-strength proxy: percentile of the opposing DST's projection (higher = tougher matchup)
+  const oppQOf = useMemo(() => {
+    const dsts = graded.filter((x) => x.pos === "DST" && x.proj > 0).sort((a, b) => a.proj - b.proj);
+    if (dsts.length < 8) return null;
+    const byTm = new Map();
+    dsts.forEach((d, i) => byTm.set(d.tm, i / (dsts.length - 1)));
+    return (tm) => (byTm.has(tm) ? byTm.get(tm) : null);
+  }, [graded]);
+  const [week, setWeek] = useState(1);
+  const [q, setQ] = useState("");
+  const byId = useMemo(() => { const m = new Map(); graded.forEach((p) => m.set(p.id, p)); return m; }, [graded]);
+  const roster = (myTeam.ids || []).map((id) => byId.get(id)).filter(Boolean);
+  const addPlayer = (p) => setMyTeam({ ids: [...(myTeam.ids || []), p.id], savedAt: myTeam.savedAt || Date.now() });
+  const removePlayer = (id) => setMyTeam({ ...myTeam, ids: (myTeam.ids || []).filter((x) => x !== id) });
+
+  // pull the drafted roster straight out of the tracker
+  const trackerIds = useMemo(() => {
+    if (!track || !track.started || !(track.picks || []).length) return [];
+    const teams = track.teams || lg.teams;
+    return (track.picks || []).filter((_, i) => snakeOwner(i, teams) === track.slot);
+  }, [track, lg.teams]);
+
+  const searchHits = q
+    ? graded.filter((p) => !(myTeam.ids || []).includes(p.id) && (p.n + p.tm + p.pos).toLowerCase().includes(q.toLowerCase())).slice(0, 6)
+    : [];
+
+  const rowStyle = { display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderBottom: `1px solid ${C.line}`, fontSize: 14, color: C.chalk };
+  const slotTag = (label) => (
+    <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: 1, color: C.turf, background: C.flag, borderRadius: 4, padding: "2px 7px", minWidth: 40, textAlign: "center" }}>{label}</span>
+  );
+
+  if (!roster.length)
+    return (
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 24, maxWidth: 620 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>MY TEAM</div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.6 }}>
+          Save your drafted roster here and Draft Lab becomes a <b style={{ color: C.chalk }}>season-long manager</b>: weekly start/sit calls, bye &amp; injury handling, and waiver-wire targets — all from the same live data.
+        </p>
+        {trackerIds.length > 0 && (
+          <button onClick={() => setMyTeam({ ids: trackerIds, savedAt: Date.now() })}
+            style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "10px 20px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, letterSpacing: 1, cursor: "pointer", marginBottom: 14 }}>
+            IMPORT MY {trackerIds.length} PICKS FROM THE DRAFT TRACKER
+          </button>
+        )}
+        <div style={{ color: C.muted, fontFamily: FONT_DISPLAY, letterSpacing: 1, fontSize: 13, marginBottom: 6 }}>OR ADD PLAYERS BY NAME</div>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a player to add…"
+          style={{ width: "100%", boxSizing: "border-box", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 14px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 15, outline: "none" }} />
+        {searchHits.map((p) => (
+          <div key={p.id} style={rowStyle}>
+            <span style={{ flex: 1 }}>{p.n} <span style={{ color: C.muted }}>{p.pos} · {p.tm}</span></span>
+            <button onClick={() => { addPlayer(p); setQ(""); }}
+              style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "5px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, cursor: "pointer" }}>ADD</button>
+          </div>
+        ))}
+      </div>
+    );
+
+  const lineup = buildLineup(roster, lg, week, sched, oppQOf);
+  const matchChip = (r) => {
+    if (!r.game) return null;
+    const tag = r.q != null && r.q <= 0.22 ? ["SOFT", C.good] : r.q != null && r.q >= 0.78 ? ["TOUGH", C.risk] : null;
+    return (
+      <span style={{ fontSize: 11, color: C.muted }}>
+        {r.game.home ? "vs" : "@"} {r.game.opp}
+        {tag && <b style={{ color: tag[1], marginLeft: 4, letterSpacing: 0.5 }}>{tag[0]}</b>}
+      </span>
+    );
+  };
+  const waivers = waiverTargets(graded, myTeam.ids || [], lg, lineup);
+  const benchReason = (x) => {
+    const elig = lineup.slots.filter((s) => s.r && SLOT_ELIG[s.label].includes(x.p.pos));
+    if (!elig.length) return `no ${x.p.pos} slot in your league`;
+    const worst = elig.reduce((a, b) => (a.r.ppg <= b.r.ppg ? a : b));
+    return `behind ${worst.r.p.n} (${worst.r.ppg} vs ${x.ppg} ppg)`;
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>MY TEAM</span>
+        <label style={{ fontSize: 13, color: C.muted }}>
+          Week{" "}
+          <select value={week} onChange={(e) => setWeek(parseInt(e.target.value, 10))}
+            style={{ background: C.panelLight, color: C.chalk, border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 6px", fontFamily: FONT_BODY, fontSize: 13 }}>
+            {Array.from({ length: 18 }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}
+          </select>
+        </label>
+        <span style={{ fontSize: 12, color: C.muted }}>
+          {roster.length} players · saved {myTeam.savedAt ? agoStr(myTeam.savedAt) : "—"}
+        </span>
+        <div style={{ flex: 1 }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Add a player…"
+          style={{ minWidth: 180, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "7px 12px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 13, outline: "none" }} />
+      </div>
+      {searchHits.length > 0 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, marginBottom: 14 }}>
+          {searchHits.map((p) => (
+            <div key={p.id} style={rowStyle}>
+              <span style={{ flex: 1 }}>{p.n} <span style={{ color: C.muted }}>{p.pos} · {p.tm}</span></span>
+              <button onClick={() => { addPlayer(p); setQ(""); }}
+                style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "5px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, cursor: "pointer" }}>ADD</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <p style={{ color: C.muted, fontSize: 12, margin: "0 0 14px" }}>
+        Per-game points are season projections ÷ 17 (2025 average as fallback){sched ? ", tilted ±8% by opponent strength — proxied from the opposing defense's projection, an honest approximation, not film study. Byes come from the real NFL schedule" : ". Weekly schedule unavailable — byes fall back to FantasyPros data"}; ruled-out players are excluded.
+      </p>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: 2, minWidth: 320 }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 16, color: C.muted, letterSpacing: 2, marginBottom: 6 }}>START — WEEK {week}</div>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
+            {lineup.slots.map((s, i) => (
+              <div key={i} style={rowStyle}>
+                {slotTag(s.label)}
+                {s.r ? (
+                  <>
+                    <span style={{ flex: 1 }}>
+                      {s.r.p.n} <span style={{ color: C.muted, fontSize: 12 }}>{s.r.p.pos} · {s.r.p.tm}</span>{" "}
+                      {matchChip(s.r)}
+                      {(s.r.p.inj === "Q" || s.r.p.inj === "D") && <Tag text={s.r.p.inj} color={C.warn} solid />}
+                    </span>
+                    <b style={{ color: gradeColor(s.r.p.comp) }} title={s.r.q != null && s.r.base !== s.r.ppg ? `${s.r.base} base, matchup-adjusted` : undefined}>{s.r.ppg} ppg</b>
+                    <button onClick={() => removePlayer(s.r.p.id)} title="Drop from team" style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13 }}>✕</button>
+                  </>
+                ) : (
+                  <span style={{ flex: 1, color: C.risk, fontSize: 13 }}>empty — no healthy option; hit the waiver wire →</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 16, color: C.muted, letterSpacing: 2, margin: "16px 0 6px" }}>SIT</div>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
+            {lineup.bench.map((x) => (
+              <div key={x.p.id} style={rowStyle}>
+                <span style={{ flex: 1 }}>{x.p.n} <span style={{ color: C.muted, fontSize: 12 }}>{x.p.pos} · {x.p.tm}</span></span>
+                <span style={{ color: C.muted, fontSize: 12 }}>{benchReason(x)}</span>
+                <button onClick={() => removePlayer(x.p.id)} title="Drop from team" style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+            {lineup.sidelined.map((x) => (
+              <div key={x.p.id} style={{ ...rowStyle, color: C.muted }}>
+                <span style={{ flex: 1, textDecoration: "line-through" }}>{x.p.n} <span style={{ fontSize: 12 }}>{x.p.pos} · {x.p.tm}</span></span>
+                <span style={{ color: C.risk, fontSize: 12, fontWeight: 700 }}>{x.onBye ? `BYE WK ${x.p.bye || ""}`.trim() : x.p.inj}</span>
+                <button onClick={() => removePlayer(x.p.id)} title="Drop from team" style={{ background: "transparent", color: C.muted, border: "none", cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+            {lineup.bench.length === 0 && lineup.sidelined.length === 0 && <div style={{ padding: "8px 12px", fontSize: 13, color: C.muted }}>No bench players.</div>}
+          </div>
+        </div>
+        <div style={{ flex: 1.4, minWidth: 280 }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 16, color: C.muted, letterSpacing: 2, marginBottom: 6 }}>WAIVER WIRE — TOP ADDS</div>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
+            {waivers.map((w) => (
+              <div key={w.p.id} style={{ padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ flex: 1, color: C.chalk, fontSize: 14 }}>
+                    {w.p.n} <span style={{ color: C.muted, fontSize: 12 }}>{w.p.pos} · {w.p.tm} · {w.ppg} ppg · PAR {w.p.par > 0 ? "+" + w.p.par : w.p.par}</span>
+                  </span>
+                  <button onClick={() => addPlayer(w.p)}
+                    style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "4px 11px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>ADD</button>
+                </div>
+                {w.reasons.length > 0 && <div style={{ color: C.flag, fontSize: 12, marginTop: 2 }}>{w.reasons.join(" · ")}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- methodology page --------------------------- */
+function MSec({ title, children }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "16px 18px", marginBottom: 14 }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 700, letterSpacing: 1.5, color: C.flag, marginBottom: 8 }}>{title}</div>
+      <div style={{ fontSize: 14, lineHeight: 1.65, color: C.chalk }}>{children}</div>
+    </div>
+  );
+}
+const Mono = ({ children }) => (
+  <code style={{ background: C.turf, border: `1px solid ${C.line}`, borderRadius: 4, padding: "1px 6px", fontSize: 12.5, color: C.good, whiteSpace: "nowrap" }}>{children}</code>
+);
+
+function MethodView({ graded, lg, sosCfg }) {
+  // live worked example: the top-ranked player with full data, decomposed the same way valueGradeOf does it
+  const ex = (graded || []).find((p) => p.par != null && p.ecr != null && p.pos !== "K" && p.pos !== "DST");
+  let bd = null;
+  if (ex) {
+    const f = ex.f || {};
+    const core = ex.par < 0 ? 64 + ex.par * 0.5 : 64 + 33 * (1 - Math.exp(-ex.par / 55));
+    const tilt = (f.dur != null ? (f.dur - 78) * 0.05 : 0) + (f.sch != null ? (f.sch - 75) * 0.04 : 0) + (f.off != null ? (f.off - 75) * 0.025 : 0);
+    const eg = ecrGradeOf(ex.ecr);
+    const blended = eg != null ? BLEND_PROJ_W * (core + tilt) + (1 - BLEND_PROJ_W) * eg : core + tilt;
+    bd = { core, tilt, eg, blended };
+  }
+  const sc = lgStarterCounts(lg);
+  const posBits = ["QB", "RB", "WR", "TE", "K", "DST"].filter((p) => sc[p] > 0).map((p) => `${p} ${Math.round(sc[p])}`).join(" · ");
+  const muted = { color: C.muted };
+  return (
+    <div>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 24, fontWeight: 700, letterSpacing: 1, color: C.chalk, marginBottom: 4 }}>HOW THE GRADES WORK</div>
+      <p style={{ ...muted, fontSize: 13, marginTop: 0, marginBottom: 16 }}>
+        Every number below describes what the model actually computes — including what it doesn't know. Settings shown reflect your league: {scLabelOf(lg.scoring)}, {lg.teams} teams{lg.sf ? ", superflex" : ""}.
+      </p>
+
+      <MSec title="THE HEADLINE GRADE (40–99)">
+        <p style={{ marginTop: 0 }}>The grade is a <b>value</b> number, not a talent opinion. It answers: <i>how many points does this player add over what you could get for free at his position, and does the expert market agree?</i> Three steps:</p>
+        <p><b style={{ color: C.flag }}>1 · Points Above Replacement (PAR).</b> Take the player's 2026 projection (re-priced to your scoring — half-PPR and standard subtract projected receptions), then subtract the projection of the <i>last league-wide starter</i> at his position. With your settings, starters consumed league-wide: <Mono>{posBits}</Mono> (flex and superflex slots are shared out fractionally). PAR is the backbone because it's cross-position: it's why a WR with +120 outranks a QB with +40 even if the QB scores more raw points.</p>
+        <p><b style={{ color: C.flag }}>2 · Curve &amp; blend.</b> PAR maps onto the 40–99 scale with diminishing returns — <Mono>64 + 33·(1 − e^(−PAR/55))</Mono> — so the difference between +150 and +170 matters less than between +10 and +30. That value grade is then blended <Mono>65% value / 35% expert consensus</Mono>, where the consensus grade comes from the FantasyPros overall rank (<Mono>64 + 33·e^(−ECR/60)</Mono>). No single source's bias runs the board.</p>
+        <p style={{ marginBottom: 0 }}><b style={{ color: C.flag }}>3 · Hard-signal tilt.</b> Availability, schedule-driven output and offense quality nudge the result a few points at most: <Mono>(avail−78)×.05 + (output−75)×.04 + (offense−75)×.025</Mono>. Kickers and defenses skip the blend and live in a compressed 42–63 band — they barely out-score their replacements, so they can't crowd the early rounds. Players with no projection cap around 58.</p>
+      </MSec>
+
+      {ex && bd && (
+        <MSec title={`WORKED EXAMPLE — ${ex.n.toUpperCase()} (LIVE NUMBERS)`}>
+          <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+            <Gauge value={ex.comp} size={72} />
+            <div style={{ flex: 1, minWidth: 260 }}>
+              <div>Projection <Mono>{Math.round(ex.proj)} pts</Mono> − replacement {ex.pos} → PAR <Mono>{ex.par > 0 ? "+" + ex.par : ex.par}</Mono></div>
+              <div>Value curve → <Mono>{bd.core.toFixed(1)}</Mono> · hard-signal tilt <Mono>{bd.tilt >= 0 ? "+" : ""}{bd.tilt.toFixed(1)}</Mono></div>
+              <div>Expert consensus ECR <Mono>#{ex.ecr}</Mono> → <Mono>{bd.eg.toFixed(1)}</Mono></div>
+              <div>Blend 65/35 → <Mono>{bd.blended.toFixed(1)}</Mono> → rounds to <b style={{ color: gaugeColor(ex.comp) }}>{ex.comp}</b> · model rank #{ex.rank}</div>
+            </div>
+          </div>
+        </MSec>
+      )}
+
+      <MSec title="THE FIVE FACTOR GAUGES">
+        <p style={{ marginTop: 0 }}>Two are <b>hard signals</b>; three are <b>projection-derived proxies</b> — the labels say which, and the tooltips repeat it. They exist to show <i>why</i> a grade is what it is:</p>
+        <p><b>Schedule</b> <span style={muted}>(hard signal)</span> — fftoolbox's 2026 strength-of-schedule rank for the player's team at his position, mapped rank 1→95, rank 32→55, over the week window in your SCHEDULE GRADE settings (full season, regular season, playoffs, or a 70/30 blend).</p>
+        <p><b>Availability</b> <span style={muted}>(hard signal)</span> — starts at 86, docked for live injury status (Q −16, D −26, OUT/IR/PUP −38, suspension −24) and age (RB 28+ −10, any 31+ −6).</p>
+        <p><b>Projected Output</b> — the player's projection percentile at his position. <b>Offense Strength</b> — his team's total projected output, normalized across the league. <b>Role &amp; Volume</b> — live depth-chart slot (starter ≈85–92, No. 2 ≈63, deeper ≈48).</p>
+        <p style={{ marginBottom: 0 }}>Gauge color runs continuously red → amber → green (≤40 is pure red, 95+ pure green), and the arc fills to the value — a fuller, greener ring is better:</p>
+        <div style={{ display: "flex", gap: 18, marginTop: 8 }}>
+          {[35, 55, 70, 85, 96].map((v) => <Gauge key={v} value={v} size={52} />)}
+        </div>
+      </MSec>
+
+      <MSec title="SCOUTED vs AUTO">
+        A few dozen players carry hand-written scouting notes and factor grades (tagged <Mono>SCOUTED</Mono>); everyone else is auto-graded from live data (tagged <Mono>AUTO</Mono>). Scouting goes stale, so it self-expires: if live rosters show a scouted player changed teams, his note, hand grades and handcuff pairing are dropped and he reverts to AUTO. Handcuff pointers are also validated every load — if the named backup left, the card points at the team's current depth-chart RB2 instead.
+      </MSec>
+
+      <MSec title="WHAT THE MODEL DOESN'T KNOW (READ THIS)">
+        <p style={{ marginTop: 0 }}>Honesty section. The projections are <b>preseason</b> — they shift a lot before Week 1, and "fresh" in the data panel means recently fetched, not final. Projections come principally from one source (ESPN), hedged by the FantasyPros blend but not eliminated. The factor gauges don't yet see real usage data — snap counts, target share, air yards. Survival odds in the draft rooms are a statistical estimate around ADP, not your league's actual behavior. And weekly start/sit in MY TEAM divides season projections by 17 — it doesn't know weekly opponents yet.</p>
+        <p style={{ marginBottom: 0 }}>Sources: ESPN (ADP · projections · injuries, hourly), Sleeper (depth charts · bios, daily), FantasyPros (expert ranks · tiers · byes, per scoring format), fftoolbox (schedule strength, baked for 2026). If a source is down, the app serves the last good copy and says so in the status panel.</p>
+      </MSec>
+    </div>
+  );
+}
+
+/* --------------------------- loading screen --------------------------- */
+function LoadingScreen({ msg, sub }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: C.turf, color: C.chalk, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <style>{`
+        @keyframes dl-word{0%,100%{opacity:.55}50%{opacity:1}}
+        @keyframes dl-run{0%{left:-9%}100%{left:82%}}
+        @keyframes dl-bob{0%,100%{transform:translateY(0) rotate(-12deg)}50%{transform:translateY(-9px) rotate(12deg)}}
+        @keyframes dl-gain{0%{width:0}100%{width:88%}}
+        @keyframes dl-dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+        .dl-load-dots::after{content:'';animation:dl-dots 1.4s steps(1) infinite}
+      `}</style>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 56, fontWeight: 700, letterSpacing: 3, lineHeight: 1, animation: "dl-word 1.6s ease-in-out infinite" }}>
+        DRAFT<span style={{ color: C.flag }}>LAB</span>
+      </div>
+      {/* football running down a yard-lined field */}
+      <div style={{ position: "relative", width: 300, height: 16, background: C.panelLight, borderRadius: 8, overflow: "hidden", marginTop: 26, border: `1px solid ${C.line}` }}>
+        {[10, 20, 30, 40, 50, 60, 70, 80, 90].map((y) => (
+          <div key={y} style={{ position: "absolute", left: `${y}%`, top: 0, bottom: 0, width: 1, background: C.line }} />
+        ))}
+        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, background: `${C.flag}33`, borderRight: `2px solid ${C.flag}`, borderRadius: 8, animation: "dl-gain 1.5s ease-in-out infinite alternate" }} />
+        <div style={{ position: "absolute", top: -3, fontSize: 15, animation: "dl-run 1.5s ease-in-out infinite alternate" }}>
+          <span style={{ display: "inline-block", animation: "dl-bob .5s ease-in-out infinite" }}>🏈</span>
+        </div>
+      </div>
+      <div className="dl-load-dots" style={{ marginTop: 22, color: C.chalk, fontFamily: FONT_DISPLAY, fontSize: 16, letterSpacing: 2, textTransform: "uppercase" }}>
+        {msg || "Loading live player data"}
+      </div>
+      {sub && <div style={{ marginTop: 8, color: C.muted, fontSize: 13, maxWidth: 360, textAlign: "center", lineHeight: 1.5 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* --------------------------- data health indicator --------------------------- */
+const agoStr = (ts) => {
+  if (!ts) return "";
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.round(h / 24) + "d ago";
+};
+function DataHealth({ status, onRefresh }) {
+  const [open, setOpen] = useState(false);
+  const st = status.state;
+  const color = st === "live" ? C.good : st === "partial" ? C.warn : st === "loading" ? C.muted : C.risk;
+  const label = st === "live" ? "LIVE" : st === "partial" ? "PARTIAL" : st === "loading" ? "LOADING…" : "SAMPLE";
+  const sources = status.sources || [];
+  return (
+    <div id="data-status" style={{ position: "relative", fontSize: 12 }}>
+      <button onClick={() => setOpen((o) => !o)} title="Data sources & freshness — click for detail"
+        style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", color, border: `1px solid ${open ? color : C.line}`, borderRadius: 6, padding: "4px 10px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, fontSize: 12, cursor: "pointer" }}>
+        <span style={{ fontSize: 9 }}>●</span> {label}
+        {status.quota && <span style={{ color: C.warn }}>⚠</span>}
+        <span style={{ color: C.muted, fontSize: 10 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 50, minWidth: 290, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, boxShadow: "0 8px 24px rgba(0,0,0,.4)" }}>
+          <div style={{ fontFamily: FONT_DISPLAY, letterSpacing: 2, color: C.muted, fontSize: 12, marginBottom: 8 }}>DATA SOURCES</div>
+          {sources.map((s) => (
+            <div key={s.key} style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "5px 0", borderBottom: `1px solid ${C.line}` }}>
+              <span style={{ color: s.ok ? (s.stale ? C.risk : s.cached ? C.warn : C.good) : C.risk, fontSize: 9 }}>●</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: C.chalk, fontWeight: 600 }}>{s.name} <span style={{ color: C.muted, fontWeight: 400, fontSize: 11 }}>· {s.desc}</span></div>
+                <div style={{ color: s.ok ? (s.stale ? C.warn : C.muted) : C.risk, fontSize: 11 }}>
+                  {s.ok ? `${s.stale ? "offline — last known good" : s.cached ? "cached" : "fresh"}${s.count ? " · " + s.count : ""}${s.ts ? " · " + agoStr(s.ts) : ""}` : `failed${s.reason ? " · " + s.reason.slice(0, 44) : ""}`}
+                </div>
+              </div>
+            </div>
+          ))}
+          {status.quota && (
+            <div style={{ color: C.warn, fontSize: 11, marginTop: 8, lineHeight: 1.4 }}>⚠ Browser storage is full, so data isn't being cached — it re-downloads (~15 MB) each load. Clearing this site's data or freeing space fixes it.</div>
+          )}
+          {sources.some((s) => s.stale) && <div style={{ color: C.warn, fontSize: 11, marginTop: 8, lineHeight: 1.4 }}>Some sources are offline — showing the last data that loaded successfully. It may be out of date.</div>}
+          {st === "sample" && <div style={{ color: C.risk, fontSize: 11, marginTop: 8, lineHeight: 1.4 }}>Live sources are unreachable — showing a small built-in sample so the app still runs. Try Refresh.</div>}
+          <div style={{ color: C.muted, fontSize: 10.5, marginTop: 8, lineHeight: 1.4, borderTop: `1px solid ${C.line}`, paddingTop: 6 }}>
+            Note: these are <b style={{ color: C.chalk }}>preseason</b> projections & ADP — they shift a lot before Week 1. "Fresh" means recently fetched, not that the underlying numbers are final.
+          </div>
+          <button onClick={onRefresh} style={{ marginTop: 10, width: "100%", background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "8px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>
+            REFRESH ALL DATA
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------- app shell --------------------------- */
+function DraftLab() {
+  const [tab, setTab] = useState("outlooks");
+  const [showSettings, setShowSettings] = useState(false);
+  const [raw, setRaw] = useState(null); // { live: {espn,sleeper,fp,trending} } or { sample: true }
+  const [status, setStatus] = useState({ state: "loading", msg: "Fetching live player data…" });
+  const [sosCfg, setSosCfgState] = useState(loadSosCfg);
+  const setSosCfg = (c) => {
+    setSosCfgState(c);
+    try { localStorage.setItem(SOS_CFG_KEY, JSON.stringify(c)); } catch (e) {}
+  };
+  const [lgCfg, setLgCfgState] = useState(loadLgCfg);
+  const setLgCfg = (c) => {
+    setLgCfgState(c);
+    try { localStorage.setItem(LG_CFG_KEY, JSON.stringify(c)); } catch (e) {}
+  };
+  const [marks, setMarksState] = useState(loadMarks);
+  const onMark = (key, patch) => setMarksState((m) => {
+    const cur = { ...(m[key] || {}), ...patch };
+    const nm = { ...m };
+    if (!cur.m && !cur.note) delete nm[key]; else nm[key] = cur;
+    try { localStorage.setItem(MARKS_KEY, JSON.stringify(nm)); } catch (e) {}
+    return nm;
+  });
+  const [track, setTrackState] = useState(loadTrack);
+  const setTrack = (t) => {
+    setTrackState(t);
+    try { localStorage.setItem(TRACK_KEY, JSON.stringify(t)); } catch (e) {}
+  };
+  const [sched, setSched] = useState(null); // weekly NFL schedule for matchup-aware start/sit
+  const [myTeam, setMyTeamState] = useState(loadMyTeam);
+  const setMyTeam = (t) => {
+    setMyTeamState(t);
+    try { localStorage.setItem(TEAM_KEY, JSON.stringify(t)); } catch (e) {}
+  };
+  const saveTeam = (ids) => { setMyTeam({ ids, savedAt: Date.now() }); setTab("team"); };
+  // keep the loading screen up long enough to be seen even when data is cached and loads instantly
+  const [minLoadDone, setMinLoadDone] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setMinLoadDone(true), 1100);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    CACHE.quota = false;
+    setStatus({ state: "loading", msg: "Fetching live player data…" });
+    (async () => {
+      const [espnR, slpR, fpR, trR, schR] = await Promise.allSettled([fetchEspn(), fetchSleeper(), fetchFp(lgCfg.scoring), fetchTrending(), fetchSched()]);
+      if (!alive) return;
+      setSched(schR.status === "fulfilled" ? schR.value.data : null);
+      const espn = espnR.status === "fulfilled" ? espnR.value : null;
+      const slp = slpR.status === "fulfilled" ? slpR.value : null;
+      const fp = fpR.status === "fulfilled" ? fpR.value : null;
+      const tr = trR.status === "fulfilled" ? trR.value : null;
+      const mk = (key, name, desc, settled, val, count) => ({
+        key, name, desc, ok: !!val, cached: val ? val.fromCache : false, stale: val ? !!val.stale : false, ts: val ? val.ts : null, count,
+        reason: settled.status === "rejected" ? String((settled.reason && settled.reason.message) || settled.reason) : null,
+      });
+      const sources = [
+        mk("espn", "ESPN", "ADP · projections · injuries", espnR, espn, espn ? espn.data.length + " players" : null),
+        mk("sleeper", "Sleeper", "depth charts · bios · photos", slpR, slp, slp ? slp.data.length + " rostered" : null),
+        mk("fp", "FantasyPros", "expert tiers · bye weeks", fpR, fp, fp ? fp.data.length + " ranked" : null),
+        mk("trend", "Trending", "most-added, last 24h", trR, tr, tr ? tr.data.length + " players" : null),
+      ];
+
+      if (!espn && !slp) {
+        setRaw({ sample: true });
+        setStatus({ state: "sample", sources, quota: CACHE.quota });
+        return;
+      }
+      const live = { espn: espn ? espn.data : [], sleeper: slp ? slp.data : [], fp: fp ? fp.data : [], trending: tr ? tr.data : [] };
+      try {
+        buildLive(live, loadSosCfg(), loadLgCfg()); // validate the merge once so a bad payload falls back to sample data
+        setRaw({ live });
+        setStatus({ state: espn && slp && fp ? "live" : "partial", sources, quota: CACHE.quota });
+      } catch (err) {
+        setRaw({ sample: true });
+        setStatus({ state: "sample", sources, quota: CACHE.quota, mergeError: err.message });
+      }
+    })();
+    return () => { alive = false; };
+  }, [lgCfg.scoring]);
+
+  const data = useMemo(() => {
+    if (!raw) return null;
+    if (raw.sample) return buildSample(sosCfg, lgCfg);
+    try { return buildLive(raw.live, sosCfg, lgCfg); } catch (e) { return buildSample(sosCfg, lgCfg); }
+  }, [raw, sosCfg, lgCfg]);
+  const trackTaken = useMemo(() => new Set(track.picks || []), [track]);
+
+  const refresh = () => {
+    Object.values(LS).forEach((k) => { try { localStorage.removeItem(k); } catch (e) {} });
+    location.reload();
+  };
+
+  if (!data || !minLoadDone)
+    return <LoadingScreen msg="Loading live player data"
+      sub="First load pulls the full Sleeper player pool (~15 MB) — cached for 24 hours after this." />;
+
+  return (
+    <div id="app-root" className="dl-fadein" style={{ minHeight: "100vh", background: C.turf, color: C.chalk, fontFamily: FONT_BODY, padding: "0 0 40px" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;600&display=swap');
+        ::selection{background:${C.flag};color:${C.turf}}
+        button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid ${C.flag};outline-offset:2px}
+        @keyframes dl-expand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+        .dl-expand{animation:dl-expand .3s cubic-bezier(.2,.7,.3,1)}
+        @keyframes dl-fadein{from{opacity:0}to{opacity:1}}
+        .dl-fadein{animation:dl-fadein .45s ease}
+        @keyframes dl-drafted{0%{transform:scale(1);box-shadow:0 0 0 0 ${C.flag}00}18%{transform:scale(1.015);box-shadow:0 0 0 3px ${C.flag}aa}45%{transform:scale(1.015)}100%{transform:scale(.94) translateX(24px);opacity:0}}
+        .dl-drafted{animation:dl-drafted .42s cubic-bezier(.4,0,.6,1) forwards;position:relative;z-index:2}
+        @keyframes dl-flash{0%{opacity:0}22%{opacity:1}100%{opacity:0}}
+        .dl-draft-badge{animation:dl-flash .42s ease forwards}
+        @keyframes dl-chip{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+        @media (prefers-reduced-motion:reduce){
+          .dl-expand,.dl-fadein{animation:dl-fadein .25s ease !important}
+          .dl-drafted{animation:none !important}
+          .dl-draft-badge{animation:none !important;opacity:1 !important}
+        }
+        .lg-sum-sh{display:none}
+        @media (max-width:640px){
+          html,body{overflow-x:hidden}
+          header{padding:14px 14px 0 !important}
+          main{padding:0 10px !important;margin-top:16px !important}
+          .pcard{padding:12px !important}
+          .pc-grade{min-width:46px !important}
+          .pc-grade svg{width:44px;height:44px}
+          .pc-name{font-size:19px !important}
+          .pc-name span{font-size:14px !important}
+          .dl-draft-badge{font-size:20px !important}
+          .lg-sum{display:none}
+          .lg-sum-sh{display:inline}
+        }
+        @media print{
+          .no-print{display:none !important}
+          body,html,#app-root{background:#fff !important;padding:0 !important}
+          #app-root>main{margin:0 !important;max-width:none !important;padding:0 !important}
+          #app-root{color:#111 !important}
+        }`}</style>
+      <header className="no-print" style={{ borderBottom: `3px solid ${C.flag}`, padding: "18px 24px 0", background: C.panel }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 700, letterSpacing: 2, lineHeight: 1 }}>
+            DRAFT<span style={{ color: C.flag }}>LAB</span>
+          </div>
+          <DataHealth status={status} onRefresh={refresh} />
+          <div style={{ flex: 1 }} />
+          <button onClick={() => setShowSettings((s) => !s)} title="League scoring, roster & schedule-grade settings"
+            style={{ background: showSettings ? C.flag : "transparent", color: showSettings ? C.turf : C.muted, border: `1px solid ${showSettings ? C.flag : C.line}`, borderRadius: 6, padding: "7px 14px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 13, letterSpacing: 1, cursor: "pointer", whiteSpace: "nowrap" }}>
+            ⚙ <span className="lg-sum">{lgSummary(lgCfg, sosCfg)}</span><span className="lg-sum-sh">SETTINGS</span>
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
+          {[["outlooks", "OUTLOOKS"], ["tiers", "TIER BOARD"], ["draft", "MOCK DRAFT"], ["tracker", "DRAFT TRACKER"], ["team", "MY TEAM"], ["sheet", "CHEAT SHEET"], ["method", "HOW IT WORKS"]].map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)}
+              style={{ position: "relative", background: "transparent", color: tab === id ? C.chalk : C.muted, border: "none", borderBottom: `3px solid ${tab === id ? C.flag : "transparent"}`, padding: "8px 6px", marginBottom: -3, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, letterSpacing: 1.5, cursor: "pointer" }}>
+              {label}
+              {id === "tracker" && track.started && (track.picks || []).length > 0 ? ` (${(track.picks || []).length})` : ""}
+            </button>
+          ))}
+        </div>
+        {showSettings && (
+          <div style={{ background: C.turf, border: `1px solid ${C.line}`, borderRadius: 8, padding: "6px 16px 14px", margin: "12px 0 16px" }}>
+            <LeagueSettings lg={lgCfg} onChange={setLgCfg} />
+            <SosSettings cfg={sosCfg} onChange={setSosCfg} />
+          </div>
+        )}
+      </header>
+      <main style={{ maxWidth: tab === "tiers" || tab === "tracker" || tab === "sheet" || tab === "team" ? 1200 : 900, margin: "24px auto 0", padding: "0 16px" }}>
+        {tab === "outlooks" ? (
+          <SearchView players={data.graded} marks={marks} onMark={onMark} />
+        ) : tab === "tiers" ? (
+          <TierBoard players={data.graded} takenIds={trackTaken} marks={marks} />
+        ) : tab === "draft" ? (
+          <DraftView key={`${lgCfg.teams}-${lgCfg.scoring}`} pool={data.pool} lg={lgCfg} marks={marks} onMark={onMark} onSaveTeam={saveTeam} />
+        ) : tab === "tracker" ? (
+          <DraftTracker pool={data.pool} lg={lgCfg} track={track} setTrack={setTrack} marks={marks} onMark={onMark} onSaveTeam={saveTeam} />
+        ) : tab === "team" ? (
+          <MyTeamView graded={data.graded} lg={lgCfg} myTeam={myTeam} setMyTeam={setMyTeam} track={track} sched={sched} />
+        ) : tab === "method" ? (
+          <MethodView graded={data.graded} lg={lgCfg} sosCfg={sosCfg} />
+        ) : (
+          <CheatSheet graded={data.graded} lg={lgCfg} marks={marks} />
+        )}
+      </main>
+      <footer className="no-print" style={{ maxWidth: 900, margin: "24px auto 0", padding: "0 16px", fontSize: 12, color: C.muted }}>
+        Live data: ESPN (ADP · projections · injuries, refreshed hourly), Sleeper (rosters · depth charts · trending, cached 24h), FantasyPros (tiers · byes), fftoolbox (2026 strength-of-schedule ranks by team + position, per week window — pick your league's weeks in SCHEDULE GRADE).
+        SCOUTED grades and notes are hand-curated; AUTO grades are derived from live data.
+      </footer>
+    </div>
+  );
+}
+
+export default DraftLab;

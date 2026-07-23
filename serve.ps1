@@ -1,5 +1,6 @@
 # Draft Lab local server — http://localhost:8843/
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (Test-Path (Join-Path $root "dist/index.html")) { $root = Join-Path $root "dist" }
 $port = 8843
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$port/")

@@ -1,7 +1,9 @@
 # Draft Lab
 
-Factor-based fantasy football draft & season tool. Single-page React app (in-browser Babel), live data from ESPN / Sleeper / FantasyPros + baked fftoolbox schedule strength.
+Factor-based fantasy football draft & season tool. React + Vite; live data from ESPN / Sleeper / FantasyPros + baked fftoolbox schedule strength.
 
-- **Run:** double-click `start-draft-lab.cmd` (serves http://localhost:8843/)
-- **Edit:** `index.html` — JSX lives in the `<script type="text/plain" id="jsx-source">` block
-- Data, marks, tracker & team state persist in browser localStorage.
+- **Use it:** double-click `start-draft-lab.cmd` → http://localhost:8843/ (serves the built app in `dist/`)
+- **Develop:** `npm run dev` (hot reload on the same port — stop the static server first), edit `src/app.jsx`
+- **Ship:** `npm run build` (refreshes `dist/`)
+
+State (league settings, marks, draft tracker, my team) persists in browser localStorage.
