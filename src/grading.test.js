@@ -1,0 +1,65 @@
+import { describe, it, expect } from "vitest";
+import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade } from "./app.jsx";
+import { mk } from "./testkit.js";
+
+describe("ecrGradeOf", () => {
+  it("ranks a better (lower) ECR higher", () => {
+    expect(ecrGradeOf(1)).toBeGreaterThan(ecrGradeOf(50));
+    expect(ecrGradeOf(50)).toBeGreaterThan(ecrGradeOf(200));
+  });
+  it("returns null for missing or out-of-range ranks", () => {
+    expect(ecrGradeOf(null)).toBeNull();
+    expect(ecrGradeOf(0)).toBeNull();
+    expect(ecrGradeOf(500)).toBeNull();
+  });
+});
+
+describe("valueGradeOf", () => {
+  it("grades an elite PAR in the 90s", () => {
+    const g = valueGradeOf(mk({ pos: "RB", par: 150, ecr: 3 }));
+    expect(g).toBeGreaterThanOrEqual(90);
+    expect(g).toBeLessThanOrEqual(99);
+  });
+  it("is monotonic in PAR — more value, higher grade", () => {
+    const lo = valueGradeOf(mk({ pos: "WR", par: 20, ecr: 60 }));
+    const hi = valueGradeOf(mk({ pos: "WR", par: 120, ecr: 6 }));
+    expect(hi).toBeGreaterThan(lo);
+  });
+  it("REGRESSION: kickers and defenses are capped in a low band (<=63)", () => {
+    // guards the bug where a kicker surfaced at model rank #7 overall
+    expect(valueGradeOf(mk({ pos: "K", par: 15, ecr: 120 }))).toBeLessThanOrEqual(63);
+    expect(valueGradeOf(mk({ pos: "DST", par: 12, ecr: 110 }))).toBeLessThanOrEqual(63);
+    // even an absurd projection + elite ECR can't lift a kicker into the early rounds
+    expect(valueGradeOf(mk({ pos: "K", par: 300, ecr: 1 }))).toBeLessThanOrEqual(63);
+  });
+  it("caps players with no projection to a bench-tier grade", () => {
+    expect(valueGradeOf(mk({ pos: "RB", par: null, ecr: null }))).toBeLessThanOrEqual(58);
+  });
+  it("always stays within [40, 99]", () => {
+    for (const par of [-40, -10, 0, 30, 90, 300]) {
+      const g = valueGradeOf(mk({ pos: "WR", par, ecr: 30 }));
+      expect(g).toBeGreaterThanOrEqual(40);
+      expect(g).toBeLessThanOrEqual(99);
+    }
+  });
+});
+
+describe("gaugeColor", () => {
+  const hue = (s) => Number(s.match(/hsl\((\d+)/)[1]);
+  it("returns an hsl() string", () => {
+    expect(gaugeColor(80)).toMatch(/^hsl\(/);
+  });
+  it("runs red (low) to green (high) as the value rises", () => {
+    expect(hue(gaugeColor(40))).toBeLessThan(hue(gaugeColor(95)));
+    expect(hue(gaugeColor(40))).toBeLessThan(30);    // red end
+    expect(hue(gaugeColor(95))).toBeGreaterThan(120); // green end
+  });
+});
+
+describe("sosGrade", () => {
+  it("maps the easiest slate high and the hardest low", () => {
+    expect(sosGrade(1)).toBe(95);
+    expect(sosGrade(32)).toBe(55);
+    expect(sosGrade(1)).toBeGreaterThan(sosGrade(32));
+  });
+});

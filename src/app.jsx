@@ -3050,4 +3050,11 @@ function DraftLab() {
   );
 }
 
+// Pure logic exported for the Vitest suite (src/*.test.js). No behavior change for the app.
+export {
+  composite, ecrGradeOf, valueGradeOf, gradeColor, letter, gaugeColor, sosGrade,
+  lgStarters, lgStarterCounts, pSurvive, snakeOwner, nextPickOf,
+  recommendPick, parsePickList, buildLineup, gradeDraft, LINEUP_OUT, SLOT_ELIG, LG_DEFAULT,
+};
+
 export default DraftLab;
