@@ -25,6 +25,15 @@ const C = {
   warn: "#FFD447",
 };
 
+// Ambient page background: a soft "stadium light" glow up top over a deep field gradient,
+// with a whisper of yard-line texture that only shows in the side margins.
+const APP_BG = [
+  "repeating-linear-gradient(90deg, rgba(233,245,238,0.016) 0 1px, transparent 1px 92px)",
+  "radial-gradient(1200px 620px at 50% -12%, rgba(63,120,80,0.55) 0%, rgba(15,35,24,0) 60%)",
+  "radial-gradient(900px 500px at 88% 8%, rgba(255,212,71,0.06) 0%, rgba(15,35,24,0) 55%)",
+  "linear-gradient(180deg, #11271B 0%, #0C1D14 52%, #06110B 100%)",
+].join(",");
+
 const FONT_DISPLAY = "'Barlow Condensed','Arial Narrow',sans-serif";
 const FONT_BODY = "'Barlow',system-ui,sans-serif";
 
@@ -2853,7 +2862,7 @@ function MethodView({ graded, lg, sosCfg }) {
 /* --------------------------- loading screen --------------------------- */
 function LoadingScreen({ msg, sub }) {
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: C.turf, color: C.chalk, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: APP_BG, backgroundColor: "#0C1D14", color: C.chalk, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <style>{`
         @keyframes dl-word{0%,100%{opacity:.55}50%{opacity:1}}
         @keyframes dl-run{0%{left:-9%}100%{left:82%}}
@@ -3040,7 +3049,7 @@ function DraftLab() {
       sub="First load pulls the full Sleeper player pool (~15 MB) — cached for 24 hours after this." />;
 
   return (
-    <div id="app-root" className="dl-fadein" style={{ minHeight: "100vh", background: C.turf, color: C.chalk, fontFamily: FONT_BODY, padding: "0 0 40px" }}>
+    <div id="app-root" className="dl-fadein" style={{ minHeight: "100vh", background: APP_BG, backgroundColor: "#0C1D14", backgroundAttachment: "fixed", color: C.chalk, fontFamily: FONT_BODY, padding: "0 0 40px" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;600&display=swap');
         ::selection{background:${C.flag};color:${C.turf}}
         button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid ${C.flag};outline-offset:2px}
