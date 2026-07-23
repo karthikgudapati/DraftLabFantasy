@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade } from "./app.jsx";
+import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade, usageRole } from "./app.jsx";
 import { mk } from "./testkit.js";
 
 describe("ecrGradeOf", () => {
@@ -53,6 +53,31 @@ describe("gaugeColor", () => {
     expect(hue(gaugeColor(40))).toBeLessThan(hue(gaugeColor(95)));
     expect(hue(gaugeColor(40))).toBeLessThan(30);    // red end
     expect(hue(gaugeColor(95))).toBeGreaterThan(120); // green end
+  });
+});
+
+describe("usageRole", () => {
+  it("returns null when there's no usage (rookies, deep bench)", () => {
+    expect(usageRole(null, "WR")).toBeNull();
+    expect(usageRole({}, "WR")).toBeNull();
+  });
+  it("grades a WR alpha (high target share) above a role-player", () => {
+    const alpha = usageRole({ ts: 30 }, "WR");   // ~30% target share
+    const role = usageRole({ ts: 12 }, "WR");     // ~12%
+    expect(alpha).toBeGreaterThan(role);
+    expect(alpha).toBeGreaterThan(85);
+    expect(role).toBeLessThan(70);
+  });
+  it("grades an RB workhorse above a committee back by touches/game", () => {
+    const bell = usageRole({ tpg: 19 }, "RB");
+    const comm = usageRole({ tpg: 8 }, "RB");
+    expect(bell).toBeGreaterThan(comm);
+    expect(bell).toBeGreaterThanOrEqual(90);
+  });
+  it("stays within [42, 95] and ignores QBs", () => {
+    expect(usageRole({ ts: 99 }, "WR")).toBeLessThanOrEqual(95);
+    expect(usageRole({ ts: 1 }, "WR")).toBeGreaterThanOrEqual(42);
+    expect(usageRole({ tpg: 25 }, "QB")).toBeNull();
   });
 });
 

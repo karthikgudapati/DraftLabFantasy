@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { USAGE_2024, USAGE_YEAR } from "./usage2024.js";
 
 /* ------------------------------------------------------------------
    DRAFT LAB — factor-based fantasy football prototype
@@ -87,7 +88,7 @@ const WEIGHTS = { sch: 0.24, off: 0.24, cmp: 0.2, sos: 0.1, dur: 0.22 };
 const FACTOR_META = [
   ["sch", "Projected Output", "Where this player's 2026 projection ranks at his position — higher means more projected fantasy points. (Scouted players carry a hand output grade.)"],
   ["off", "Offense Strength", "Quality of the surrounding offense, derived from the team's total projected fantasy output."],
-  ["cmp", "Role & Volume", "How locked-in the workload looks, from live depth-chart standing. (Scouted players carry a hand role grade.)"],
+  ["cmp", "Role & Volume", "How locked-in the workload is — real 2024 usage (target share for pass-catchers, touches per game for backs) blended with live depth-chart standing. A partly-hard signal."],
   ["sos", "Schedule", "2026 fantasy strength of schedule — fftoolbox rank of the team's slate at this position, over the weeks set in SCHEDULE GRADE. A hard signal, not a projection."],
   ["dur", "Availability", "Durability outlook from current injury status and age. A hard signal, not a projection."],
 ];
@@ -127,6 +128,22 @@ function valueGradeOf(p) {
   let g = (p.par < 0 ? 64 + p.par * 0.5 : 64 + 33 * (1 - Math.exp(-p.par / 55))) + tilt;
   if (eg != null) g = BLEND_PROJ_W * g + (1 - BLEND_PROJ_W) * eg; // consensus of projections + experts
   return Math.round(Math.max(40, Math.min(99, g)));
+}
+
+// Real role signal from prior-season (2024) usage: target share for pass-catchers, touches per
+// game for backs. Returns a 42-95 factor grade, or null when there's no usage to lean on (rookies,
+// deep bench) — in which case Role & Volume falls back to the live depth chart.
+function usageRole(u, pos) {
+  if (!u) return null;
+  if (pos === "WR" || pos === "TE") {
+    if (!u.ts) return null;
+    return Math.round(Math.max(42, Math.min(95, 40 + u.ts * 1.85))); // ~24% tgt share -> WR1, 30%+ alpha
+  }
+  if (pos === "RB") {
+    if (!u.tpg) return null;
+    return Math.round(Math.max(42, Math.min(94, 40 + u.tpg * 2.9))); // 18+/g workhorse, ~10 committee
+  }
+  return null; // QB role isn't usage-driven here
 }
 
 const gradeColor = (v) => (v >= 85 ? C.good : v >= 72 ? C.warn : C.risk);
@@ -1039,6 +1056,17 @@ function buildLive({ espn, sleeper, fp, trending }, sosCfg, lgCfg) {
     else if (r.age >= 31) dur -= 6;
     dur = Math.max(35, dur);
 
+    // 2024 usage → real Role & Volume (blended 60% usage / 40% depth chart when usage exists)
+    const usage = USAGE_2024[key] || null;
+    const uRole = usageRole(usage, r.pos);
+    let f;
+    if (cur) {
+      f = sosR ? { ...cur.f, sos } : { ...cur.f };
+      if (uRole != null) f.cmp = Math.round(0.6 * uRole + 0.4 * cur.f.cmp);
+    } else {
+      f = { sch, off, cmp: uRole != null ? Math.round(0.6 * uRole + 0.4 * cmp) : cmp, sos, dur };
+    }
+
     const injText = injTag ? ` · currently ${injTag}${r.injPart ? " (" + r.injPart.toLowerCase() + ")" : ""}` : "";
     const autoNote = r.deep
       ? `Deep-roster player — no 2026 mock-draft projection yet. Auto-graded from live roster data: ${r.depth ? "depth chart #" + r.depth : "no depth-chart slot"}${injText}.`
@@ -1047,7 +1075,8 @@ function buildLive({ espn, sleeper, fp, trending }, sosCfg, lgCfg) {
     return {
       id: r.id, n: r.n, pos: r.pos, tm: r.tm,
       adp: r.adpLive != null ? r.adpLive : cur0 ? cur0.adp : 999,
-      f: cur ? (sosR ? { ...cur.f, sos } : cur.f) : { sch, off, cmp, sos, dur },
+      f,
+      usage,
       sosRank: sosR, sosWin: sv.win, sosRegRank: sv.regRank, sosPoRank: sv.poRank,
       note: cur ? cur.note : autoNote,
       cuff,
@@ -1185,6 +1214,40 @@ function statLine25(p) {
   const g = p.avg25 > 0 ? Math.round(p.pts25 / p.avg25) : null;
   bits.push(`${p.pts25} ${p.sc || "PPR"}${g ? ` in ${g} gm (${p.avg25}/g)` : ""}`);
   return "2025: " + bits.join("  |  ");
+}
+
+// Prior-season (2024) usage chips — the real share metrics ESPN's box score doesn't give you.
+function UsageChips({ p }) {
+  const u = p.usage;
+  if (!u) return null;
+  const chips = [];
+  if (p.pos === "WR" || p.pos === "TE") {
+    if (u.ts) chips.push(["TGT SHARE", u.ts + "%"]);
+    if (u.tgt) chips.push(["TARGETS", u.tgt]);
+    if (u.wopr) chips.push(["WOPR", u.wopr]);
+    if (u.ay) chips.push(["AIR YDS SHARE", u.ay + "%"]);
+  } else if (p.pos === "RB") {
+    if (u.tpg) chips.push(["TOUCHES/G", u.tpg]);
+    if (u.car) chips.push(["CARRIES", u.car]);
+    if (u.tgt) chips.push(["TARGETS", u.tgt]);
+    if (u.ts) chips.push(["TGT SHARE", u.ts + "%"]);
+  } else return null;
+  if (!chips.length) return null;
+  return (
+    <div style={{ margin: "6px 0 2px" }}>
+      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1.5, color: C.muted, marginBottom: 4 }}>
+        {USAGE_YEAR} USAGE <span style={{ opacity: 0.7 }}>· latest fully-charted season</span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {chips.map(([lb, v]) => (
+          <span key={lb} style={{ display: "inline-flex", alignItems: "baseline", gap: 4, background: C.turf, border: `1px solid ${C.line}`, borderRadius: 4, padding: "2px 8px", fontSize: 11.5 }}>
+            <span style={{ color: C.muted, fontWeight: 600 }}>{lb}</span>
+            <b style={{ color: C.chalk }}>{v}</b>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function genOutlook(p) {
@@ -1713,6 +1776,7 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline }) {
                 {statLine25(p)}
               </div>
             )}
+            <UsageChips p={p} />
             <p style={{ fontFamily: FONT_BODY, fontSize: 14, lineHeight: 1.55, color: C.chalk, margin: "6px 0 0" }}>
               {genOutlook(p)}
             </p>
@@ -2750,7 +2814,7 @@ function MethodView({ graded, lg, sosCfg }) {
         <p style={{ marginTop: 0 }}>Two are <b>hard signals</b>; three are <b>projection-derived proxies</b> — the labels say which, and the tooltips repeat it. They exist to show <i>why</i> a grade is what it is:</p>
         <p><b>Schedule</b> <span style={muted}>(hard signal)</span> — fftoolbox's 2026 strength-of-schedule rank for the player's team at his position, mapped rank 1→95, rank 32→55, over the week window in your SCHEDULE GRADE settings (full season, regular season, playoffs, or a 70/30 blend).</p>
         <p><b>Availability</b> <span style={muted}>(hard signal)</span> — starts at 86, docked for live injury status (Q −16, D −26, OUT/IR/PUP −38, suspension −24) and age (RB 28+ −10, any 31+ −6).</p>
-        <p><b>Projected Output</b> — the player's projection percentile at his position. <b>Offense Strength</b> — his team's total projected output, normalized across the league. <b>Role &amp; Volume</b> — live depth-chart slot (starter ≈85–92, No. 2 ≈63, deeper ≈48).</p>
+        <p><b>Projected Output</b> — the player's projection percentile at his position. <b>Offense Strength</b> — his team's total projected output, normalized across the league. <b>Role &amp; Volume</b> — now grounded in <b>real {USAGE_YEAR} usage</b>: target share for receivers (~24% = a WR1, 30%+ an alpha), touches per game for backs (18+ a workhorse), blended 60/40 with the live depth chart. This is the one proxy factor that became a hard signal.</p>
         <p style={{ marginBottom: 0 }}>Gauge color runs continuously red → amber → green (≤40 is pure red, 95+ pure green), and the arc fills to the value — a fuller, greener ring is better:</p>
         <div style={{ display: "flex", gap: 18, marginTop: 8 }}>
           {[35, 55, 70, 85, 96].map((v) => <Gauge key={v} value={v} size={52} />)}
@@ -2762,7 +2826,7 @@ function MethodView({ graded, lg, sosCfg }) {
       </MSec>
 
       <MSec title="WHAT THE MODEL DOESN'T KNOW (READ THIS)">
-        <p style={{ marginTop: 0 }}>Honesty section. The projections are <b>preseason</b> — they shift a lot before Week 1, and "fresh" in the data panel means recently fetched, not final. Projections come principally from one source (ESPN), hedged by the FantasyPros blend but not eliminated. The factor gauges don't yet see real usage data — snap counts, target share, air yards. Survival odds in the draft rooms are a statistical estimate around ADP, not your league's actual behavior. And weekly start/sit in MY TEAM divides season projections by 17 — it doesn't know weekly opponents yet.</p>
+        <p style={{ marginTop: 0 }}>Honesty section. The projections are <b>preseason</b> — they shift a lot before Week 1, and "fresh" in the data panel means recently fetched, not final. Projections come principally from one source (ESPN), hedged by the FantasyPros blend but not eliminated. Usage (target share, touches) is real but from <b>{USAGE_YEAR}</b> — the latest fully-charted season available — so it lags a player who changed roles this offseason. Survival odds in the draft rooms are a statistical estimate around ADP, not your league's actual behavior. And weekly start/sit in MY TEAM divides season projections by 17, tilting only ±8% for the opponent — it isn't true weekly projection.</p>
         <p style={{ marginBottom: 0 }}>Sources: ESPN (ADP · projections · injuries, hourly), Sleeper (depth charts · bios, daily), FantasyPros (expert ranks · tiers · byes, per scoring format), fftoolbox (schedule strength, baked for 2026). If a source is down, the app serves the last good copy and says so in the status panel.</p>
       </MSec>
     </div>
@@ -3052,7 +3116,7 @@ function DraftLab() {
 
 // Pure logic exported for the Vitest suite (src/*.test.js). No behavior change for the app.
 export {
-  composite, ecrGradeOf, valueGradeOf, gradeColor, letter, gaugeColor, sosGrade,
+  composite, ecrGradeOf, valueGradeOf, usageRole, gradeColor, letter, gaugeColor, sosGrade,
   lgStarters, lgStarterCounts, pSurvive, snakeOwner, nextPickOf,
   recommendPick, parsePickList, buildLineup, gradeDraft, LINEUP_OUT, SLOT_ELIG, LG_DEFAULT,
 };
