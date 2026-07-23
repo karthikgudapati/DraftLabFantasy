@@ -1185,6 +1185,17 @@ const aAn = (w) => (/^[aeiou]/i.test(w) ? "an" : "a");
 const cleanPart = (t) => t.split(/\s*-\s*/).map((seg) => seg.split(" ").map((x) => (x === x.toUpperCase() && x.length <= 4 ? x : x.toLowerCase())).join(" ")).join("/");
 
 const TEAM_CITY = { ARI: "Arizona", ATL: "Atlanta", BAL: "Baltimore", BUF: "Buffalo", CAR: "Carolina", CHI: "Chicago", CIN: "Cincinnati", CLE: "Cleveland", DAL: "Dallas", DEN: "Denver", DET: "Detroit", GB: "Green Bay", HOU: "Houston", IND: "Indianapolis", JAX: "Jacksonville", KC: "Kansas City", LAC: "Los Angeles", LAR: "Los Angeles", LV: "Las Vegas", MIA: "Miami", MIN: "Minnesota", NE: "New England", NO: "New Orleans", NYG: "New York", NYJ: "New York", PHI: "Philadelphia", PIT: "Pittsburgh", SEA: "Seattle", SF: "San Francisco", TB: "Tampa Bay", TEN: "Tennessee", WAS: "Washington" };
+// Vibrant, team-evocative accent colors chosen to read on the dark canvas (not always the official primary).
+const TEAM_COLOR = {
+  ARI: "#E24666", ATL: "#E8384A", BAL: "#8A7FE8", BUF: "#3A7DE8", CAR: "#28B4E8", CHI: "#E86A2A",
+  CIN: "#FB4F14", CLE: "#F26A28", DAL: "#5B8DEF", DEN: "#FB6B2A", DET: "#4AA6E0", GB: "#3AA85A",
+  HOU: "#5A8AAA", IND: "#3A78D8", JAX: "#00A6B8", KC: "#E8384A", LAC: "#3AB4E8", LAR: "#5B8DEF",
+  LV: "#B8C0C4", MIA: "#00C2CC", MIN: "#8B5BC8", NE: "#E8546A", NO: "#D3BC8D", NYG: "#4C7FE0",
+  NYJ: "#3AA860", PHI: "#2AA89A", PIT: "#FFC838", SEA: "#69BE28", SF: "#E86A6A", TB: "#E8384A",
+  TEN: "#4C9BE0", WAS: "#C8564A",
+};
+const teamColor = (tm) => TEAM_COLOR[tm] || C.muted;
+
 const TEAM_NICK = { ARI: "the Cardinals", ATL: "the Falcons", BAL: "the Ravens", BUF: "the Bills", CAR: "the Panthers", CHI: "the Bears", CIN: "the Bengals", CLE: "the Browns", DAL: "the Cowboys", DEN: "the Broncos", DET: "the Lions", GB: "the Packers", HOU: "the Texans", IND: "the Colts", JAX: "the Jaguars", KC: "the Chiefs", LAC: "the Chargers", LAR: "the Rams", LV: "the Raiders", MIA: "the Dolphins", MIN: "the Vikings", NE: "the Patriots", NO: "the Saints", NYG: "the Giants", NYJ: "the Jets", PHI: "the Eagles", PIT: "the Steelers", SEA: "the Seahawks", SF: "the 49ers", TB: "the Buccaneers", TEN: "the Titans", WAS: "the Commanders" };
 
 // "Amon-Ra St. Brown" -> "St. Brown"; "Brian Thomas Jr." -> "Thomas"
@@ -1586,20 +1597,24 @@ const fmtHt = (h) => {
   return !isNaN(n) && n > 12 ? `${Math.floor(n / 12)}'${n % 12}"` : String(h);
 };
 
-function PlayerPhoto({ p, size }) {
+function PlayerPhoto({ p, size, ring }) {
   const [i, setI] = useState(0);
   const srcs = p.photos || [];
+  const col = ring || C.line;
+  // team-tinted backdrop so headshots (transparent PNGs) sit on color, not flat gray
+  const bg = ring ? `linear-gradient(160deg, ${ring}44, ${ring}18)` : C.panelLight;
+  const common = { width: size, height: size, flex: "none", borderRadius: size / 2, border: `2px solid ${col}`, background: bg, boxSizing: "border-box" };
   if (i >= srcs.length) {
-    const initials = p.n.split(" ").map((w) => w[0]).slice(0, 2).join("");
+    const initials = (p.n || "?").split(" ").map((w) => w[0]).slice(0, 2).join("");
     return (
-      <div style={{ width: size, height: size, flex: "none", borderRadius: 8, background: C.panelLight, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: size / 2.6, color: C.muted }}>
-        {initials}
+      <div style={{ ...common, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: size / 2.6, color: C.chalk }}>
+        {p.pos === "DST" ? <TeamLogo tm={p.tm} size={size * 0.62} /> : initials}
       </div>
     );
   }
   return (
     <img src={srcs[i]} alt={p.n} referrerPolicy="no-referrer" onError={() => setI(i + 1)}
-      style={{ width: size, height: size, flex: "none", borderRadius: 8, background: C.panelLight, border: `1px solid ${C.line}`, objectFit: "cover", objectPosition: "top" }} />
+      style={{ ...common, objectFit: "cover", objectPosition: "top" }} />
   );
 }
 
@@ -1633,8 +1648,7 @@ function PlayerBio({ p }) {
   const hasAny = (p.photos && p.photos.length > 0) || p.ht || p.wt || p.col || p.exp != null || (p.tm && p.tm !== "FA");
   if (!hasAny) return null;
   return (
-    <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 12, background: C.panelLight, border: `1px solid ${C.line}`, borderRadius: 8, padding: 10 }}>
-      <PlayerPhoto p={p} size={64} />
+    <div style={{ display: "flex", gap: 18, alignItems: "center", marginBottom: 12, background: C.panelLight, border: `1px solid ${C.line}`, borderLeft: `3px solid ${teamColor(p.tm)}`, borderRadius: 8, padding: "10px 14px" }}>
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center", flex: 1 }}>
         <BioStat label="HT" value={fmtHt(p.ht)} />
         <BioStat label="WT" value={p.wt ? `${p.wt} lbs` : null} />
@@ -1680,21 +1694,24 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline }) {
     setTimeout(() => onPick(p), 400); // let the draft animation play before the card is removed
   };
   return (
-    <div className={"pcard" + (drafting ? " dl-drafted" : "")} style={{ position: "relative", background: C.panel, border: `1px solid ${drafting ? C.flag : C.line}`, borderRadius: 8, padding: 16, marginBottom: 12 }}>
+    <div className={"pcard" + (drafting ? " dl-drafted" : "")} style={{ position: "relative", background: `linear-gradient(100deg, ${teamColor(p.tm)}14, ${C.panel} 32%)`, border: `1px solid ${drafting ? C.flag : C.line}`, borderLeft: `4px solid ${teamColor(p.tm)}`, borderRadius: 8, padding: 14, marginBottom: 12, overflow: "hidden" }}>
       {drafting && (
         <div className="dl-draft-badge" style={{ position: "absolute", inset: 0, zIndex: 3, borderRadius: 8, background: `${C.turf}d9`, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 28, letterSpacing: 3, color: takenLabel ? C.muted : C.flag }}>
           <span style={{ fontSize: 30 }}>{takenLabel ? "✕" : "✓"}</span>{takenLabel ? "OFF THE BOARD" : "DRAFTED!"}
         </div>
       )}
       <div style={{ display: "flex", alignItems: "center", gap: 12, cursor: compact ? "pointer" : "default" }} onClick={() => compact && setOpen(!open)}>
+        <div className="pc-photo" style={{ flex: "none" }}>
+          <PlayerPhoto p={p} size={56} ring={teamColor(p.tm)} />
+        </div>
         <div className="pc-grade" title="Value grade — projected points above replacement (your league settings) blended 65/35 with FantasyPros expert-consensus rank, nudged by availability & schedule"
-          style={{ flex: "none", minWidth: 58, textAlign: "center", lineHeight: 1 }}>
-          <Gauge value={p.comp} size={56} />
-          <div style={{ fontSize: 10, color: C.muted, letterSpacing: 2, fontFamily: FONT_DISPLAY, marginTop: 1 }}>GRADE</div>
+          style={{ flex: "none", minWidth: 54, textAlign: "center", lineHeight: 1 }}>
+          <Gauge value={p.comp} size={52} />
+          <div style={{ fontSize: 9, color: C.muted, letterSpacing: 2, fontFamily: FONT_DISPLAY, marginTop: 1 }}>GRADE</div>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="pc-name" style={{ fontFamily: FONT_DISPLAY, fontSize: 24, fontWeight: 600, color: C.chalk, letterSpacing: 0.5 }}>
-            {p.n} <span style={{ color: C.muted, fontSize: 17 }}>{p.pos} · {p.tm}</span>
+          <div className="pc-name" style={{ fontFamily: FONT_DISPLAY, fontSize: 23, fontWeight: 600, color: C.chalk, letterSpacing: 0.5 }}>
+            {p.n} <span style={{ color: C.muted, fontSize: 16 }}>{p.pos} · {p.tm}</span>
             {p.inj && <Tag text={p.inj} color={C.risk} solid />}
             {mk === "t" && <Tag text="⭐ TARGET" color={C.good} />}
             {mk === "a" && <Tag text="🚫 AVOID" color={C.risk} />}
@@ -3027,6 +3044,10 @@ function DraftLab() {
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;600&display=swap');
         ::selection{background:${C.flag};color:${C.turf}}
         button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid ${C.flag};outline-offset:2px}
+        .pcard{transition:transform .13s ease, box-shadow .13s ease, border-color .13s ease}
+        .pcard:hover{transform:translateY(-1px);box-shadow:0 6px 20px -6px rgba(0,0,0,.55)}
+        .pc-photo img,.pc-photo>div{transition:transform .13s ease}
+        .pcard:hover .pc-photo img,.pcard:hover .pc-photo>div{transform:scale(1.06)}
         @keyframes dl-expand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
         .dl-expand{animation:dl-expand .3s cubic-bezier(.2,.7,.3,1)}
         @keyframes dl-fadein{from{opacity:0}to{opacity:1}}
@@ -3046,9 +3067,10 @@ function DraftLab() {
           html,body{overflow-x:hidden}
           header{padding:14px 14px 0 !important}
           main{padding:0 10px !important;margin-top:16px !important}
-          .pcard{padding:12px !important}
-          .pc-grade{min-width:46px !important}
-          .pc-grade svg{width:44px;height:44px}
+          .pcard{padding:11px !important}
+          .pc-grade{min-width:42px !important}
+          .pc-grade svg{width:42px;height:42px}
+          .pc-photo img,.pc-photo>div{width:44px !important;height:44px !important}
           .pc-name{font-size:19px !important}
           .pc-name span{font-size:14px !important}
           .dl-draft-badge{font-size:20px !important}
