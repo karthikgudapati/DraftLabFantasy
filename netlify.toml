@@ -1,0 +1,10 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# expose the function at a clean /api/fp path
+[[redirects]]
+  from = "/api/fp"
+  to = "/.netlify/functions/fp"
+  status = 200

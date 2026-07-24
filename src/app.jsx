@@ -272,10 +272,13 @@ async function fetchFp(scoring) {
   const key = LS.fp + "_" + sc;
   const cached = cacheGet(key, TTL.fp);
   if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
+  // FantasyPros only allows CORS from localhost; on a deployed domain go through our /api/fp proxy.
+  const onLocal = typeof location !== "undefined" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  const fpUrl = onLocal
+    ? "https://partners.fantasypros.com/api/v1/consensus-rankings.php?sport=NFL&year=2026&week=0&position=ALL&type=ST&scoring=" + sc + "&export=json"
+    : "/api/fp?scoring=" + sc;
   try {
-    const res = await fetch(
-      "https://partners.fantasypros.com/api/v1/consensus-rankings.php?sport=NFL&year=2026&week=0&position=ALL&type=ST&scoring=" + sc + "&export=json"
-    );
+    const res = await fetch(fpUrl);
     if (!res.ok) throw new Error("FantasyPros HTTP " + res.status);
     const json = await res.json();
     const slim = (json.players || []).map((p) => ({
