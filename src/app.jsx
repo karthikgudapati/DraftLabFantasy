@@ -302,6 +302,45 @@ async function fetchTrending() {
 }
 
 // Weekly NFL schedule: { TEAM: { "week": { opp, home } } } — a missing week = bye. Cached 7 days.
+// Per-game fantasy points from ESPN's stat columns (keyed by their `names`), using the league's
+// reception value. Standard scoring otherwise (pass TD 4, INT −2, rush/rec TD 6, fumble lost −2).
+const FP_W = { passingYards: 0.04, passingTouchdowns: 4, interceptions: -2, rushingYards: 0.1, rushingTouchdowns: 6, receivingYards: 0.1, receivingTouchdowns: 6, fumblesLost: -2 };
+function gameFP(names, stats, recWeight) {
+  let fp = 0;
+  (names || []).forEach((nm, i) => {
+    const v = parseFloat(String(stats[i] || "0").replace(/,/g, "")) || 0;
+    if (nm === "receptions") fp += v * recWeight;
+    else if (FP_W[nm]) fp += v * FP_W[nm];
+  });
+  return Math.round(fp * 10) / 10;
+}
+
+// ESPN per-player game log — position-specific columns + weekly stats + a season list. CORS-open,
+// cached per athlete+season for the session. `season` omitted = latest.
+const GLOG_CACHE = new Map();
+function parseGameLog(j) {
+  const sf = (j.filters || []).find((f) => f.name === "season") || {};
+  const seasonOpts = (sf.options || []).map((o) => ({ value: o.value, label: o.displayValue }));
+  const evMeta = j.events || {};
+  const reg = (j.seasonTypes || []).find((s) => /Regular/.test(s.displayName)) || (j.seasonTypes || [])[0] || {};
+  const cat = (reg.categories || [])[0] || {};
+  const games = (cat.events || []).map((e) => {
+    const m = evMeta[e.eventId] || {};
+    return { week: m.week, opp: (m.opponent && m.opponent.abbreviation) || "?", atVs: m.atVs || "vs", result: m.gameResult || "", score: m.score || "", stats: e.stats || [] };
+  }).sort((a, b) => (a.week || 0) - (b.week || 0));
+  return { seasonOpts, curSeason: sf.value, labels: j.labels || [], names: j.names || [], games, totals: cat.totals || [] };
+}
+async function fetchGameLog(espnId, season) {
+  const key = espnId + ":" + (season || "latest");
+  if (GLOG_CACHE.has(key)) return GLOG_CACHE.get(key);
+  const url = "https://site.api.espn.com/apis/common/v3/sports/football/nfl/athletes/" + espnId + "/gamelog" + (season ? "?season=" + season : "");
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Game log HTTP " + res.status);
+  const parsed = parseGameLog(await res.json());
+  GLOG_CACHE.set(key, parsed);
+  return parsed;
+}
+
 async function fetchSched() {
   const cached = cacheGet("dl_sched_v1", 7 * 24 * 3600e3);
   if (cached) return { data: cached.data, fromCache: true, ts: cached.ts };
@@ -1098,7 +1137,7 @@ function buildLive({ espn, sleeper, fp, trending }, sosCfg, lgCfg) {
       age: r.age, exp: r.exp, depth: r.depth,
       trending: r.slpId ? trendSet.has(r.slpId) : false,
       ht: r.ht, wt: r.wt, col: r.col,
-      auc: r.auc, sc: scLabelOf(lg.scoring), lgTeams: lg.teams,
+      auc: r.auc, sc: scLabelOf(lg.scoring), lgTeams: lg.teams, espnId: r.espnId,
       photos: r.pos === "DST"
         ? (r.tm && r.tm !== "FA" ? [`https://sleepercdn.com/images/team_logos/nfl/${r.tm.toLowerCase()}.png`] : [])
         : [
@@ -1689,9 +1728,121 @@ function Chip({ label, value, color, hi, title }) {
   );
 }
 
+/* --------------------------- game log (chart + table) --------------------------- */
+function GameLog({ p }) {
+  const recWeight = p.sc === "PPR" ? 1 : p.sc === "half-PPR" ? 0.5 : 0;
+  const [season, setSeason] = useState(null); // null = latest
+  const [st, setSt] = useState({ loading: true });
+  const [hover, setHover] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setSt({ loading: true });
+    fetchGameLog(p.espnId, season)
+      .then((d) => alive && setSt({ data: d }))
+      .catch((e) => alive && setSt({ error: e.message }));
+    return () => { alive = false; };
+  }, [p.espnId, season]);
+
+  const box = { background: C.turf, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginTop: 8 };
+  if (st.loading) return <div style={{ ...box, color: C.muted, fontSize: 13 }}>Loading game log…</div>;
+  if (st.error) return <div style={{ ...box, color: C.risk, fontSize: 13 }}>Game log unavailable ({st.error}).</div>;
+  const d = st.data;
+  const { labels, names, games, totals } = d;
+  if (!games.length)
+    return (
+      <div style={box}>
+        <SeasonPicker d={d} season={season} setSeason={setSeason} />
+        <div style={{ color: C.muted, fontSize: 13, marginTop: 8 }}>No regular-season games logged in this season.</div>
+      </div>
+    );
+
+  const fps = games.map((g) => gameFP(names, g.stats, recWeight));
+  const maxFp = Math.max(12, ...fps);
+  const avg = Math.round((fps.reduce((a, b) => a + b, 0) / fps.length) * 10) / 10;
+  const total = Math.round(fps.reduce((a, b) => a + b, 0) * 10) / 10;
+
+  return (
+    <div style={box}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 13, letterSpacing: 1.5, color: C.chalk }}>WEEKLY {p.sc === "PPR" ? "PPR" : p.sc === "half-PPR" ? "HALF-PPR" : "STD"} POINTS</span>
+        <SeasonPicker d={d} season={season} setSeason={setSeason} />
+        <span style={{ fontSize: 12, color: C.muted }}>avg <b style={{ color: C.chalk }}>{avg}</b> · total <b style={{ color: C.chalk }}>{total}</b></span>
+      </div>
+      {/* single-series bar chart: height carries magnitude, one hue, avg reference line, per-bar hover */}
+      <div style={{ position: "relative", paddingTop: 22 }}>
+        <div style={{ position: "relative", height: 132, display: "flex", alignItems: "flex-end", gap: 3 }}>
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: `${(avg / maxFp) * 100}%`, borderTop: `1px dashed ${C.muted}66` }} />
+          {games.map((g, i) => (
+            <div key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+              style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%", minWidth: 6 }}>
+              <div style={{ height: `${Math.max(1.5, (fps[i] / maxFp) * 100)}%`, background: hover === i ? C.flag : gaugeColor(45 + (fps[i] / maxFp) * 52), borderRadius: "4px 4px 0 0", transition: "background .1s" }} />
+            </div>
+          ))}
+          {hover != null && (
+            <div style={{ position: "absolute", bottom: "calc(100% + 2px)", left: `${((hover + 0.5) / games.length) * 100}%`, transform: "translateX(-50%)", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 8px", fontSize: 11, whiteSpace: "nowrap", zIndex: 5, pointerEvents: "none", boxShadow: "0 4px 12px rgba(0,0,0,.4)" }}>
+              Wk {games[hover].week} {games[hover].atVs}{games[hover].opp} · <b style={{ color: games[hover].result === "W" ? C.good : C.risk }}>{games[hover].result} {games[hover].score}</b> · <b style={{ color: C.flag }}>{fps[hover]} pt</b>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 3, marginTop: 3 }}>
+          {games.map((g, i) => (
+            <div key={i} style={{ flex: 1, minWidth: 6, textAlign: "center", fontSize: 9.5, color: hover === i ? C.flag : C.muted }}>{g.week}</div>
+          ))}
+        </div>
+      </div>
+      {/* full stat table — the required table view, using ESPN's position-specific columns */}
+      <div style={{ overflowX: "auto", marginTop: 12, border: `1px solid ${C.line}`, borderRadius: 6 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 11.5, whiteSpace: "nowrap" }}>
+          <thead>
+            <tr style={{ background: C.panel, color: C.muted, fontFamily: FONT_DISPLAY, letterSpacing: 0.5 }}>
+              <th style={{ padding: "5px 8px", textAlign: "left" }}>WK</th>
+              <th style={{ padding: "5px 8px", textAlign: "left" }}>OPP</th>
+              <th style={{ padding: "5px 8px", textAlign: "left" }}>RESULT</th>
+              {labels.map((l, i) => <th key={i} style={{ padding: "5px 8px", textAlign: "right" }} title={names[i]}>{l}</th>)}
+              <th style={{ padding: "5px 8px", textAlign: "right", color: C.flag }}>FP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {games.map((g, i) => (
+              <tr key={i} style={{ borderTop: `1px solid ${C.line}`, background: hover === i ? `${C.flag}14` : i % 2 ? `${C.panel}66` : "transparent" }}
+                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+                <td style={{ padding: "4px 8px", color: C.muted }}>{g.week}</td>
+                <td style={{ padding: "4px 8px" }}>{g.atVs}{g.opp}</td>
+                <td style={{ padding: "4px 8px", color: g.result === "W" ? C.good : g.result === "L" ? C.risk : C.muted }}>{g.result} {g.score}</td>
+                {g.stats.map((s, j) => <td key={j} style={{ padding: "4px 8px", textAlign: "right", color: C.chalk }}>{s}</td>)}
+                <td style={{ padding: "4px 8px", textAlign: "right", fontWeight: 700, color: C.flag }}>{fps[i]}</td>
+              </tr>
+            ))}
+            {totals.length > 0 && (
+              <tr style={{ borderTop: `2px solid ${C.line}`, fontWeight: 700, color: C.chalk }}>
+                <td style={{ padding: "5px 8px", color: C.muted }} colSpan={3}>TOTALS</td>
+                {totals.map((t, j) => <td key={j} style={{ padding: "5px 8px", textAlign: "right" }}>{t}</td>)}
+                <td style={{ padding: "5px 8px", textAlign: "right", color: C.flag }}>{total}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+function SeasonPicker({ d, season, setSeason }) {
+  const opts = d.seasonOpts && d.seasonOpts.length ? d.seasonOpts : (d.curSeason ? [{ value: d.curSeason, label: d.curSeason }] : []);
+  return (
+    <label style={{ fontSize: 12, color: C.muted }}>
+      Season{" "}
+      <select value={season || d.curSeason || ""} onChange={(e) => setSeason(e.target.value)}
+        style={{ background: C.panelLight, color: C.chalk, border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 6px", fontFamily: FONT_BODY, fontSize: 12 }}>
+        {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </label>
+  );
+}
+
 function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onCompare, compareOn }) {
   const [open, setOpen] = useState(!compact);
   const [drafting, setDrafting] = useState(false);
+  const [showLog, setShowLog] = useState(false);
   const key = markKeyOf(p);
   const mk = (marks && marks[key] && marks[key].m) || null;
   const note = (marks && marks[key] && marks[key].note) || "";
@@ -1814,6 +1965,15 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onC
               {genOutlook(p)}
             </p>
           </div>
+          {p.espnId && (
+            <div style={{ marginTop: 10 }}>
+              <button onClick={(e) => { e.stopPropagation(); setShowLog((s) => !s); }}
+                style={{ background: showLog ? C.flag : "transparent", color: showLog ? C.turf : C.muted, border: `1px solid ${showLog ? C.flag : C.line}`, borderRadius: 6, padding: "6px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 12, letterSpacing: 1.5, cursor: "pointer" }}>
+                📊 GAME LOG {showLog ? "▾" : "▸"}
+              </button>
+              {showLog && <div onClick={(e) => e.stopPropagation()}><GameLog p={p} /></div>}
+            </div>
+          )}
           {onMark && (
             <input value={note} placeholder="Your draft note for this player (saved in this browser)…"
               onChange={(e) => onMark(key, { note: e.target.value })} onClick={(e) => e.stopPropagation()}
@@ -3281,7 +3441,7 @@ function DraftLab() {
 
 // Pure logic exported for the Vitest suite (src/*.test.js). No behavior change for the app.
 export {
-  composite, ecrGradeOf, valueGradeOf, usageRole, shortVerdict, gradeColor, letter, gaugeColor, sosGrade,
+  composite, ecrGradeOf, valueGradeOf, usageRole, shortVerdict, gameFP, gradeColor, letter, gaugeColor, sosGrade,
   lgStarters, lgStarterCounts, pSurvive, snakeOwner, nextPickOf,
   recommendPick, parsePickList, buildLineup, gradeDraft, LINEUP_OUT, SLOT_ELIG, LG_DEFAULT,
 };

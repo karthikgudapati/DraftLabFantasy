@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade, usageRole, shortVerdict } from "./app.jsx";
+import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade, usageRole, shortVerdict, gameFP } from "./app.jsx";
 import { mk } from "./testkit.js";
 
 describe("ecrGradeOf", () => {
@@ -92,6 +92,21 @@ describe("shortVerdict", () => {
   it("scales the call with the grade", () => {
     expect(shortVerdict(mk({ proj: 250, comp: 90, edge: 0 }))).toMatch(/elite/i);
     expect(shortVerdict(mk({ proj: 250, comp: 64, edge: 0 }))).toMatch(/late-round/i);
+  });
+});
+
+describe("gameFP (game-log fantasy points)", () => {
+  const names = ["passingYards", "passingTouchdowns", "interceptions", "rushingYards", "rushingTouchdowns"];
+  it("scores a QB line by standard weights (yds .04, passTD 4, INT -2, rushYd .1, rushTD 6)", () => {
+    // 394 pass yds (15.76) + 2 passTD (8) + 0 INT + 30 rush yds (3) + 2 rushTD (12) = 38.76 -> 38.8
+    expect(gameFP(names, ["394", "2", "0", "30", "2"], 1)).toBeCloseTo(38.8, 1);
+  });
+  it("applies the league reception weight (PPR 1, half .5, std 0) and parses comma numbers", () => {
+    const rec = ["receptions", "receivingYards", "receivingTouchdowns"];
+    // 8 rec, 1,105 yds (110.5), 1 TD (6)
+    expect(gameFP(rec, ["8", "1,105", "1"], 1)).toBeCloseTo(124.5, 1);
+    expect(gameFP(rec, ["8", "1,105", "1"], 0.5)).toBeCloseTo(120.5, 1);
+    expect(gameFP(rec, ["8", "1,105", "1"], 0)).toBeCloseTo(116.5, 1);
   });
 });
 
