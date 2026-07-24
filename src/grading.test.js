@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade, usageRole } from "./app.jsx";
+import { valueGradeOf, ecrGradeOf, gaugeColor, sosGrade, usageRole, shortVerdict } from "./app.jsx";
 import { mk } from "./testkit.js";
 
 describe("ecrGradeOf", () => {
@@ -78,6 +78,20 @@ describe("usageRole", () => {
     expect(usageRole({ ts: 99 }, "WR")).toBeLessThanOrEqual(95);
     expect(usageRole({ ts: 1 }, "WR")).toBeGreaterThanOrEqual(42);
     expect(usageRole({ tpg: 25 }, "QB")).toBeNull();
+  });
+});
+
+describe("shortVerdict", () => {
+  it("flags a no-projection player as a watchlist name", () => {
+    expect(shortVerdict(mk({ proj: 0 }))).toMatch(/watchlist/i);
+  });
+  it("calls out clear value and clear overpricing", () => {
+    expect(shortVerdict(mk({ proj: 250, comp: 82, edge: 20 }))).toMatch(/value/i);
+    expect(shortVerdict(mk({ proj: 250, comp: 80, edge: -20 }))).toMatch(/overpriced/i);
+  });
+  it("scales the call with the grade", () => {
+    expect(shortVerdict(mk({ proj: 250, comp: 90, edge: 0 }))).toMatch(/elite/i);
+    expect(shortVerdict(mk({ proj: 250, comp: 64, edge: 0 }))).toMatch(/late-round/i);
   });
 });
 

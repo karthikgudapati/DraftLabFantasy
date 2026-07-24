@@ -1689,7 +1689,7 @@ function Chip({ label, value, color, hi, title }) {
   );
 }
 
-function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline }) {
+function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onCompare, compareOn }) {
   const [open, setOpen] = useState(!compact);
   const [drafting, setDrafting] = useState(false);
   const key = markKeyOf(p);
@@ -1752,6 +1752,13 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline }) {
           </div>
           {subline && <div style={{ fontSize: 12, color: C.flag, marginTop: 5, fontFamily: FONT_DISPLAY, letterSpacing: 0.5 }}>{subline}</div>}
         </div>
+        {onCompare && (
+          <button onClick={(e) => { e.stopPropagation(); onCompare(p.id); }}
+            title={compareOn ? "Remove from comparison" : "Add to comparison"}
+            style={{ background: compareOn ? C.flag : "transparent", color: compareOn ? C.turf : C.muted, border: `1px solid ${compareOn ? C.flag : C.line}`, borderRadius: 6, padding: "6px 9px", fontSize: 15, cursor: "pointer", flex: "none" }}>
+            ⚖
+          </button>
+        )}
         {onMark && (
           <button onClick={(e) => { e.stopPropagation(); onMark(key, { m: mk === "t" ? "a" : mk === "a" ? null : "t" }); }}
             title="Click to cycle: target ⭐ → avoid 🚫 → clear"
@@ -1826,7 +1833,7 @@ const SORTS = [
   ["par", "PAR", (a, b) => (b.par == null ? -1e9 : b.par) - (a.par == null ? -1e9 : a.par)],
   ["ecr", "EXPERT", (a, b) => (a.ecr || 1e9) - (b.ecr || 1e9)],
 ];
-function SearchView({ players, marks, onMark }) {
+function SearchView({ players, marks, onMark, compareIds, onCompare }) {
   const [q, setQ] = useState("");
   const [pos, setPos] = useState("ALL");
   const [sortBy, setSortBy] = useState("rank");
@@ -1865,7 +1872,7 @@ function SearchView({ players, marks, onMark }) {
       {list.length > RENDER_CAP && (
         <p style={{ color: C.muted, fontSize: 13 }}>Showing top {RENDER_CAP} of {list.length} by {(SORTS.find(([id]) => id === sortBy) || SORTS[0])[1].toLowerCase()} — refine the search to see deeper players.</p>
       )}
-      {list.slice(0, RENDER_CAP).map((p) => <PlayerCard key={p.id} p={p} compact marks={marks} onMark={onMark} />)}
+      {list.slice(0, RENDER_CAP).map((p) => <PlayerCard key={p.id} p={p} compact marks={marks} onMark={onMark} onCompare={onCompare} compareOn={compareIds && compareIds.includes(p.id)} />)}
     </div>
   );
 }
@@ -2859,6 +2866,125 @@ function MethodView({ graded, lg, sosCfg }) {
   );
 }
 
+/* --------------------------- compare view --------------------------- */
+// crisp model-derived one-liner (reliable, unlike scraping the prose)
+const shortVerdict = (p) => {
+  if (!p.proj) return "Watchlist / late flier.";
+  if (p.edge != null && p.edge > 12 && p.comp >= 75) return "Value — worth reaching for.";
+  if (p.edge != null && p.edge < -12 && p.comp >= 72) return "Overpriced — let him come to you.";
+  if (p.comp >= 88) return "Elite — foundational pick.";
+  if (p.comp >= 80) return "Strong every-week starter.";
+  if (p.comp >= 72) return "Dependable mid-round pick.";
+  if (p.comp >= 62) return "Late-round upside dart.";
+  return "Deep bench / situation-dependent.";
+};
+function CompareView({ graded, compareIds, onCompare, setCompareIds }) {
+  const [q, setQ] = useState("");
+  const byId = useMemo(() => { const m = new Map(); graded.forEach((p) => m.set(p.id, p)); return m; }, [graded]);
+  const players = compareIds.map((id) => byId.get(id)).filter(Boolean);
+  const hits = q ? graded.filter((p) => !compareIds.includes(p.id) && (p.n + p.tm + p.pos).toLowerCase().includes(q.toLowerCase())).slice(0, 6) : [];
+
+  // one comparison row: label + a cell per player, leader highlighted when a metric is directional
+  const Row = ({ label, get, render, better, hint }) => {
+    const vals = players.map(get);
+    let lead = -1;
+    if (better) {
+      const nums = vals.map((v) => (typeof v === "number" && isFinite(v) ? v : null));
+      const valid = nums.filter((v) => v != null);
+      if (valid.length > 1) {
+        const t = better === "hi" ? Math.max(...valid) : Math.min(...valid);
+        if (nums.filter((v) => v === t).length === 1) lead = nums.indexOf(t);
+      }
+    }
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: `120px repeat(${players.length}, 1fr)`, borderTop: `1px solid ${C.line}`, alignItems: "center" }}>
+        <div title={hint} style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1.5, color: C.muted, padding: "9px 10px", textTransform: "uppercase" }}>{label}</div>
+        {players.map((p, i) => (
+          <div key={p.id} style={{ padding: "8px 10px", textAlign: "center", background: i === lead ? `${C.good}1e` : "transparent", borderLeft: `1px solid ${C.line}` }}>
+            {render ? render(vals[i], p, i === lead) : (vals[i] == null ? "—" : vals[i])}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  if (players.length < 2)
+    return (
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 24, maxWidth: 620 }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 26, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>COMPARE PLAYERS</div>
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.6 }}>
+          Put two or three players side by side — grade, value, factor gauges, usage and schedule, aligned for a direct call. Add them with the <b style={{ color: C.flag }}>⚖</b> button on any card in OUTLOOKS, or search below. ({players.length}/3 added.)
+        </p>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a player to add…"
+          style={{ width: "100%", boxSizing: "border-box", background: C.turf, border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 14px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 15, outline: "none" }} />
+        {hits.map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px", borderBottom: `1px solid ${C.line}`, fontSize: 14, color: C.chalk }}>
+            <PlayerPhoto p={p} size={30} ring={teamColor(p.tm)} />
+            <span style={{ flex: 1 }}>{p.n} <span style={{ color: C.muted }}>{p.pos} · {p.tm}</span></span>
+            <button onClick={() => { onCompare(p.id); setQ(""); }}
+              style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "5px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, cursor: "pointer" }}>ADD</button>
+          </div>
+        ))}
+      </div>
+    );
+
+  const ppg25 = (p) => (p.pts25 > 0 && p.avg25 > 0 ? p.avg25 : null);
+  const usageVal = (p) => (p.usage ? (p.pos === "RB" ? p.usage.tpg : p.usage.ts) : null);
+  const usageLbl = players.every((p) => p.pos === "RB") ? "TOUCHES/G (’24)" : "TGT SHARE (’24)";
+  const factorRows = FACTOR_META.map(([k, label]) => (
+    <Row key={k} label={label} get={(p) => p.f[k]} better="hi"
+      render={(v) => <div style={{ display: "inline-block" }}><Gauge value={v} size={46} /></div>} />
+  ));
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, color: C.chalk, letterSpacing: 1 }}>COMPARE</span>
+        <span style={{ fontSize: 12, color: C.muted }}>{players.length}/3 · green = best in row</span>
+        <div style={{ flex: 1 }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Add a player…"
+          style={{ minWidth: 170, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "7px 12px", color: C.chalk, fontFamily: FONT_BODY, fontSize: 13, outline: "none" }} />
+        <button onClick={() => setCompareIds([])} style={{ background: C.panel, color: C.risk, border: `1px solid ${C.line}`, borderRadius: 6, padding: "7px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, letterSpacing: 1, cursor: "pointer" }}>CLEAR</button>
+      </div>
+      {hits.length > 0 && players.length < 3 && (
+        <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, marginBottom: 12 }}>
+          {hits.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderBottom: `1px solid ${C.line}`, fontSize: 14, color: C.chalk }}>
+              <PlayerPhoto p={p} size={28} ring={teamColor(p.tm)} />
+              <span style={{ flex: 1 }}>{p.n} <span style={{ color: C.muted }}>{p.pos} · {p.tm}</span></span>
+              <button onClick={() => { onCompare(p.id); setQ(""); }} style={{ background: C.flag, color: C.turf, border: "none", borderRadius: 6, padding: "5px 12px", fontFamily: FONT_DISPLAY, fontWeight: 700, cursor: "pointer" }}>ADD</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ overflowX: "auto", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+        {/* header: photo + name + grade per player */}
+        <div style={{ display: "grid", gridTemplateColumns: `120px repeat(${players.length}, 1fr)`, alignItems: "stretch" }}>
+          <div />
+          {players.map((p) => (
+            <div key={p.id} style={{ padding: "14px 10px", textAlign: "center", borderLeft: `1px solid ${C.line}`, background: `linear-gradient(180deg, ${teamColor(p.tm)}22, transparent)` }}>
+              <PlayerPhoto p={p} size={56} ring={teamColor(p.tm)} />
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 700, color: C.chalk, marginTop: 6, lineHeight: 1.1 }}>{p.n}</div>
+              <div style={{ fontSize: 12, color: C.muted }}>{p.pos} · {p.tm}{p.bye ? ` · bye ${p.bye}` : ""}</div>
+              <div style={{ marginTop: 6 }}><Gauge value={p.comp} size={50} /></div>
+              <button onClick={() => onCompare(p.id)} title="Remove" style={{ marginTop: 4, background: "transparent", color: C.muted, border: `1px solid ${C.line}`, borderRadius: 5, padding: "2px 9px", fontSize: 12, cursor: "pointer" }}>✕ remove</button>
+            </div>
+          ))}
+        </div>
+        <Row label="Model rank" get={(p) => p.rank} better="lo" render={(v) => <b style={{ color: C.chalk }}>#{v}</b>} />
+        <Row label="ADP" get={(p) => (p.adp < 500 ? p.adp : null)} better="lo" hint="Average draft position — lower goes earlier" />
+        <Row label="PAR" hint="Points above replacement (your league)" get={(p) => p.par} better="hi" render={(v) => (v == null ? "—" : <b style={{ color: v > 0 ? C.good : C.muted }}>{v > 0 ? "+" + v : v}</b>)} />
+        <Row label="Value vs ADP" get={(p) => p.edge} better="hi" render={(v) => (v == null ? "—" : <span style={{ color: v > 4 ? C.good : v < -4 ? C.risk : C.muted, fontWeight: 700 }}>{v > 0 ? "+" + v : v}</span>)} />
+        <Row label="Expert ECR" hint="FantasyPros consensus rank" get={(p) => p.ecr} better="lo" render={(v) => (v == null ? "—" : "#" + v)} />
+        {factorRows}
+        <Row label={usageLbl} get={usageVal} better="hi" render={(v) => (v == null ? "—" : <b style={{ color: C.chalk }}>{v}{players.every((p) => p.pos === "RB") ? "" : "%"}</b>)} />
+        <Row label="2025 PPR/g" get={ppg25} better="hi" render={(v) => (v == null ? "—" : <b style={{ color: C.chalk }}>{v}</b>)} />
+        <Row label="Verdict" get={() => 0} render={(v, p) => <span style={{ fontSize: 12.5, color: C.chalk, lineHeight: 1.4, display: "block" }}>{shortVerdict(p)}</span>} />
+      </div>
+    </div>
+  );
+}
+
 /* --------------------------- loading screen --------------------------- */
 function LoadingScreen({ msg, sub }) {
   return (
@@ -2984,6 +3110,11 @@ function DraftLab() {
     try { localStorage.setItem(TEAM_KEY, JSON.stringify(t)); } catch (e) {}
   };
   const saveTeam = (ids) => { setMyTeam({ ids, savedAt: Date.now() }); setTab("team"); };
+  const [compareIds, setCompareState] = useState(() => {
+    try { const v = JSON.parse(localStorage.getItem("dl_compare_v1") || "[]"); return Array.isArray(v) ? v.slice(0, 3) : []; } catch (e) { return []; }
+  });
+  const setCompareIds = (ids) => { setCompareState(ids); try { localStorage.setItem("dl_compare_v1", JSON.stringify(ids)); } catch (e) {} };
+  const toggleCompare = (id) => setCompareIds(compareIds.includes(id) ? compareIds.filter((x) => x !== id) : [...compareIds, id].slice(-3));
   // keep the loading screen up long enough to be seen even when data is cached and loads instantly
   const [minLoadDone, setMinLoadDone] = useState(false);
   useEffect(() => {
@@ -3105,11 +3236,12 @@ function DraftLab() {
           </button>
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
-          {[["outlooks", "OUTLOOKS"], ["tiers", "TIER BOARD"], ["draft", "MOCK DRAFT"], ["tracker", "DRAFT TRACKER"], ["team", "MY TEAM"], ["sheet", "CHEAT SHEET"], ["method", "HOW IT WORKS"]].map(([id, label]) => (
+          {[["outlooks", "OUTLOOKS"], ["compare", "COMPARE"], ["tiers", "TIER BOARD"], ["draft", "MOCK DRAFT"], ["tracker", "DRAFT TRACKER"], ["team", "MY TEAM"], ["sheet", "CHEAT SHEET"], ["method", "HOW IT WORKS"]].map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
               style={{ position: "relative", background: "transparent", color: tab === id ? C.chalk : C.muted, border: "none", borderBottom: `3px solid ${tab === id ? C.flag : "transparent"}`, padding: "8px 6px", marginBottom: -3, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, letterSpacing: 1.5, cursor: "pointer" }}>
               {label}
               {id === "tracker" && track.started && (track.picks || []).length > 0 ? ` (${(track.picks || []).length})` : ""}
+              {id === "compare" && compareIds.length > 0 ? ` (${compareIds.length})` : ""}
             </button>
           ))}
         </div>
@@ -3120,9 +3252,11 @@ function DraftLab() {
           </div>
         )}
       </header>
-      <main style={{ maxWidth: tab === "tiers" || tab === "tracker" || tab === "sheet" || tab === "team" ? 1200 : 900, margin: "24px auto 0", padding: "0 16px" }}>
+      <main style={{ maxWidth: tab === "tiers" || tab === "tracker" || tab === "sheet" || tab === "team" || tab === "compare" ? 1200 : 900, margin: "24px auto 0", padding: "0 16px" }}>
         {tab === "outlooks" ? (
-          <SearchView players={data.graded} marks={marks} onMark={onMark} />
+          <SearchView players={data.graded} marks={marks} onMark={onMark} compareIds={compareIds} onCompare={toggleCompare} />
+        ) : tab === "compare" ? (
+          <CompareView graded={data.graded} compareIds={compareIds} onCompare={toggleCompare} setCompareIds={setCompareIds} />
         ) : tab === "tiers" ? (
           <TierBoard players={data.graded} takenIds={trackTaken} marks={marks} />
         ) : tab === "draft" ? (
@@ -3147,7 +3281,7 @@ function DraftLab() {
 
 // Pure logic exported for the Vitest suite (src/*.test.js). No behavior change for the app.
 export {
-  composite, ecrGradeOf, valueGradeOf, usageRole, gradeColor, letter, gaugeColor, sosGrade,
+  composite, ecrGradeOf, valueGradeOf, usageRole, shortVerdict, gradeColor, letter, gaugeColor, sosGrade,
   lgStarters, lgStarterCounts, pSurvive, snakeOwner, nextPickOf,
   recommendPick, parsePickList, buildLineup, gradeDraft, LINEUP_OUT, SLOT_ELIG, LG_DEFAULT,
 };
