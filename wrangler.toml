@@ -1,0 +1,5 @@
+# Cloudflare config so `npx wrangler pages deploy` knows the output dir + name.
+# (Change `name` to match your Cloudflare Pages project if it differs.)
+name = "draftlabfantasy"
+pages_build_output_dir = "dist"
+compatibility_date = "2024-11-01"
