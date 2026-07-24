@@ -24,6 +24,10 @@ git push -u origin main
 3. **Save and Deploy.** Cloudflare auto-detects the `functions/` folder, so `/api/fp` just works.
    Your site is live at `https://draft-lab.pages.dev` (custom domain optional).
 
+> **Node version:** the repo pins Node 22 via `.node-version` / `.nvmrc` (Vite 8 needs Node ≥ 20).
+> If a build ever fails with a Node/engine error, set an env var **`NODE_VERSION=22`** in the Pages
+> project (Settings → Environment variables) and redeploy.
+
 ## Option 2 — Netlify
 
 1. Dashboard → **Add new site → Import an existing project** → pick `draft-lab`.
