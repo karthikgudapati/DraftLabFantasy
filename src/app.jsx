@@ -18,7 +18,7 @@ const C = {
   panelLight: "#24422F",
   line: "#33543F",
   chalk: "#F2EFE6",
-  muted: "#8FAE9A",
+  muted: "#A0BEA9", // secondary text — clears WCAG AA (>=5.5:1) on every app surface
   flag: "#FFD447",
   risk: "#E4572E",
   good: "#7BD389",
@@ -1203,19 +1203,31 @@ function arcPath(cx, cy, r) {
   const [x1, y1] = polarXY(cx, cy, r, 135);
   return `M ${x0} ${y0} A ${r} ${r} 0 1 1 ${x1} ${y1}`;
 }
-// Semicircular attribute gauge: fill length tracks the value, color runs red→green.
-function Gauge({ value, size = 64, withLetter }) {
+// Semicircular attribute gauge: fill length tracks the value, color runs red→green. Notches at the
+// good/elite thresholds give a non-color cue (fill past a notch = crossed that tier) for CVD readers,
+// and the number/letter are always shown; role=img + aria-label make it screen-reader legible.
+const GAUGE_TICKS = [72, 85]; // matches gradeColor() tiers: <72 weak, 72–84 solid, 85+ elite
+function Gauge({ value, size = 64, withLetter, label }) {
   const v = Math.max(0, Math.min(100, Math.round(value || 0)));
   const col = gaugeColor(v);
   const sw = Math.max(5, size * 0.105);
   const r = (size - sw) / 2 - 1;
   const cx = size / 2, cy = size / 2;
   const d = arcPath(cx, cy, r);
+  const tier = v >= 85 ? "elite" : v >= 72 ? "solid" : v >= 55 ? "below average" : "weak";
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
+    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} role="img"
+      aria-label={`${label ? label + ": " : ""}${v} out of 100${withLetter ? " (grade " + letter(v) + ")" : ""}, ${tier}`}
+      style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
       <path d={d} pathLength="100" stroke={C.panelLight} strokeWidth={sw} fill="none" strokeLinecap="round" />
       <path d={d} pathLength="100" stroke={col} strokeWidth={sw} fill="none" strokeLinecap="round"
         strokeDasharray={`${v} 100`} style={{ transition: "stroke-dasharray .55s cubic-bezier(.25,.7,.35,1), stroke .3s ease" }} />
+      {GAUGE_TICKS.map((t) => {
+        const ang = -135 + (t / 100) * 270;
+        const [ix, iy] = polarXY(cx, cy, r - sw / 2 - 0.5, ang);
+        const [ox, oy] = polarXY(cx, cy, r + sw / 2 + 0.5, ang);
+        return <line key={t} x1={ix} y1={iy} x2={ox} y2={oy} stroke={C.turf} strokeWidth={Math.max(1.5, size * 0.028)} />;
+      })}
       <text x={cx} y={withLetter ? cy - size * 0.02 : cy + size * 0.02} textAnchor="middle" dominantBaseline="middle"
         fill={col} fontFamily={FONT_DISPLAY} fontWeight="700" fontSize={size * 0.34}>{v}</text>
       {withLetter && (
@@ -1863,13 +1875,18 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onC
           <span style={{ fontSize: 30 }}>{takenLabel ? "✕" : "✓"}</span>{takenLabel ? "OFF THE BOARD" : "DRAFTED!"}
         </div>
       )}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, cursor: compact ? "pointer" : "default" }} onClick={() => compact && setOpen(!open)}>
-        <div className="pc-photo" style={{ flex: "none" }}>
+      <div className={compact ? "pc-head" : ""} style={{ display: "flex", alignItems: "center", gap: 12, cursor: compact ? "pointer" : "default" }}
+        onClick={() => compact && setOpen(!open)}
+        role={compact ? "button" : undefined} tabIndex={compact ? 0 : undefined}
+        aria-expanded={compact ? open : undefined}
+        aria-label={compact ? `${p.n}, ${p.pos} ${p.tm}, grade ${p.comp}. ${open ? "Collapse" : "Expand"} details` : undefined}
+        onKeyDown={compact ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } } : undefined}>
+        <div className="pc-photo" style={{ flex: "none" }} aria-hidden="true">
           <PlayerPhoto p={p} size={56} ring={teamColor(p.tm)} />
         </div>
         <div className="pc-grade" title="Value grade — projected points above replacement (your league settings) blended 65/35 with FantasyPros expert-consensus rank, nudged by availability & schedule"
           style={{ flex: "none", minWidth: 54, textAlign: "center", lineHeight: 1 }}>
-          <Gauge value={p.comp} size={52} />
+          <Gauge value={p.comp} size={52} label="Value grade" />
           <div style={{ fontSize: 9, color: C.muted, letterSpacing: 2, fontFamily: FONT_DISPLAY, marginTop: 1 }}>GRADE</div>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -1908,14 +1925,16 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onC
         </div>
         {onCompare && (
           <button onClick={(e) => { e.stopPropagation(); onCompare(p.id); }}
-            title={compareOn ? "Remove from comparison" : "Add to comparison"}
+            title={compareOn ? "Remove from comparison" : "Add to comparison"} aria-pressed={!!compareOn}
+            aria-label={(compareOn ? "Remove " : "Add ") + p.n + (compareOn ? " from" : " to") + " comparison"}
             style={{ background: compareOn ? C.flag : "transparent", color: compareOn ? C.turf : C.muted, border: `1px solid ${compareOn ? C.flag : C.line}`, borderRadius: 6, padding: "6px 9px", fontSize: 15, cursor: "pointer", flex: "none" }}>
             ⚖
           </button>
         )}
         {onMark && (
           <button onClick={(e) => { e.stopPropagation(); onMark(key, { m: mk === "t" ? "a" : mk === "a" ? null : "t" }); }}
-            title="Click to cycle: target ⭐ → avoid 🚫 → clear"
+            title="Cycle: target ⭐ → avoid 🚫 → clear"
+            aria-label={`${p.n} is ${mk === "t" ? "a target" : mk === "a" ? "an avoid" : "unmarked"}. Activate to ${mk === "t" ? "mark as avoid" : mk === "a" ? "clear" : "mark as target"}`}
             style={{ background: "transparent", color: C.muted, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 9px", fontSize: 15, cursor: "pointer", flex: "none" }}>
             {mk === "t" ? "⭐" : mk === "a" ? "🚫" : "☆"}
           </button>
@@ -1939,7 +1958,7 @@ function PlayerCard({ p, compact, onPick, pickLabel, marks, onMark, subline, onC
               }
               return (
                 <div key={k} title={ht} style={{ textAlign: "center", flex: "1 1 96px", minWidth: 92, maxWidth: 150 }}>
-                  <Gauge value={p.f[k]} size={72} withLetter />
+                  <Gauge value={p.f[k]} size={72} withLetter label={label} />
                   <div style={{ fontFamily: FONT_DISPLAY, fontSize: 11, letterSpacing: 1.2, textTransform: "uppercase", color: C.muted, marginTop: 3, lineHeight: 1.25 }}>{label}</div>
                   {sub && <div style={{ fontSize: 10.5, color: C.flag, marginTop: 2, lineHeight: 1.3 }}>{sub}</div>}
                 </div>
@@ -3129,7 +3148,7 @@ function CompareView({ graded, compareIds, onCompare, setCompareIds }) {
               <PlayerPhoto p={p} size={56} ring={teamColor(p.tm)} />
               <div style={{ fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 700, color: C.chalk, marginTop: 6, lineHeight: 1.1 }}>{p.n}</div>
               <div style={{ fontSize: 12, color: C.muted }}>{p.pos} · {p.tm}{p.bye ? ` · bye ${p.bye}` : ""}</div>
-              <div style={{ marginTop: 6 }}><Gauge value={p.comp} size={50} /></div>
+              <div style={{ marginTop: 6 }}><Gauge value={p.comp} size={50} label="Value grade" /></div>
               <button onClick={() => onCompare(p.id)} title="Remove" style={{ marginTop: 4, background: "transparent", color: C.muted, border: `1px solid ${C.line}`, borderRadius: 5, padding: "2px 9px", fontSize: 12, cursor: "pointer" }}>✕ remove</button>
             </div>
           ))}
@@ -3344,9 +3363,14 @@ function DraftLab() {
 
   return (
     <div id="app-root" className="dl-fadein" style={{ minHeight: "100vh", background: APP_BG, backgroundColor: "#0C1D14", backgroundAttachment: "fixed", color: C.chalk, fontFamily: FONT_BODY, padding: "0 0 40px" }}>
+      <a href="#main" className="skip-link">Skip to content</a>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;600&display=swap');
         ::selection{background:${C.flag};color:${C.turf}}
-        button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid ${C.flag};outline-offset:2px}
+        button:focus-visible,input:focus-visible,select:focus-visible,[role=button]:focus-visible,[tabindex]:focus-visible,a:focus-visible{outline:2px solid ${C.flag};outline-offset:2px;border-radius:6px}
+        .pc-head:focus-visible{box-shadow:0 0 0 2px ${C.flag}}
+        .skip-link{position:absolute;left:-9999px;top:8px;z-index:10000;background:${C.flag};color:${C.turf};padding:8px 14px;border-radius:6px;font-family:${FONT_DISPLAY};font-weight:700;letter-spacing:1px;text-decoration:none}
+        .skip-link:focus{left:12px}
+        @media (prefers-reduced-motion:no-preference){:focus-visible{transition:box-shadow .1s ease}}
         .pcard{transition:transform .13s ease, box-shadow .13s ease, border-color .13s ease}
         .pcard:hover{transform:translateY(-1px);box-shadow:0 6px 20px -6px rgba(0,0,0,.55)}
         .pc-photo img,.pc-photo>div{transition:transform .13s ease}
@@ -3400,7 +3424,7 @@ function DraftLab() {
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
           {[["outlooks", "OUTLOOKS"], ["compare", "COMPARE"], ["tiers", "TIER BOARD"], ["draft", "MOCK DRAFT"], ["tracker", "DRAFT TRACKER"], ["team", "MY TEAM"], ["sheet", "CHEAT SHEET"], ["method", "HOW IT WORKS"]].map(([id, label]) => (
-            <button key={id} onClick={() => setTab(id)}
+            <button key={id} onClick={() => setTab(id)} aria-current={tab === id ? "page" : undefined}
               style={{ position: "relative", background: "transparent", color: tab === id ? C.chalk : C.muted, border: "none", borderBottom: `3px solid ${tab === id ? C.flag : "transparent"}`, padding: "8px 6px", marginBottom: -3, fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15, letterSpacing: 1.5, cursor: "pointer" }}>
               {label}
               {id === "tracker" && track.started && (track.picks || []).length > 0 ? ` (${(track.picks || []).length})` : ""}
@@ -3415,7 +3439,7 @@ function DraftLab() {
           </div>
         )}
       </header>
-      <main style={{ maxWidth: tab === "tiers" || tab === "tracker" || tab === "sheet" || tab === "team" || tab === "compare" ? 1200 : 900, margin: "24px auto 0", padding: "0 16px" }}>
+      <main id="main" style={{ maxWidth: tab === "tiers" || tab === "tracker" || tab === "sheet" || tab === "team" || tab === "compare" ? 1200 : 900, margin: "24px auto 0", padding: "0 16px" }}>
         {tab === "outlooks" ? (
           <SearchView players={data.graded} marks={marks} onMark={onMark} compareIds={compareIds} onCompare={toggleCompare} />
         ) : tab === "compare" ? (
